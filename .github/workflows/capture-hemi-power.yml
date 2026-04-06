@@ -2,8 +2,8 @@ name: Capture Hemispheric Power
 
 on:
   schedule:
-    - cron: '58 23 * * *'   # 23:58 UTC — 2 min before NOAA midnight reset
-  workflow_dispatch:          # allow manual trigger for testing
+    - cron: '58 23 * * *'
+  workflow_dispatch:
 
 jobs:
   capture:
@@ -17,66 +17,55 @@ jobs:
 
       - name: Fetch and update hemispheric power data
         run: |
-          set -e
-          NOAA_URL="https://services.swpc.noaa.gov/text/aurora-nowcast-hemi-power.txt"
-          DATA_FILE="data/hemispheric_power_history.json"
-          TODAY=$(date -u +%Y-%m-%d)
-          NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          CUTOFF=$(date -u -d "3 days ago" +%Y-%m-%d)
+          python3 << 'PYEOF'
+          import urllib.request, json, os, re
+          from datetime import datetime, timezone, timedelta
 
-          # Fetch NOAA data
-          NOAA_RAW=$(curl -s --fail "$NOAA_URL")
+          NOAA_URL = "https://services.swpc.noaa.gov/text/aurora-nowcast-hemi-power.txt"
+          DATA_FILE = "data/hemispheric_power_history.json"
+          DAYS_TO_KEEP = 3
 
-          # Parse into JSON array of readings using Python
-          READINGS=$(python3 - <<'PYEOF'
-          import sys, json, re
-          raw = """$NOAA_RAW"""
+          req = urllib.request.Request(NOAA_URL, headers={"User-Agent": "AuroraTracker/1.0"})
+          with urllib.request.urlopen(req, timeout=15) as resp:
+              raw = resp.read().decode("utf-8")
+
           readings = []
           for line in raw.splitlines():
               line = line.strip()
-              if not line or line.startswith('#') or line.startswith('-'):
+              if not line or line.startswith("#") or line.startswith("-") or "UTC_Time" in line:
                   continue
-              parts = re.split(r'\s+', line)
+              parts = re.split(r"\s+", line)
               if len(parts) < 4:
                   continue
               try:
                   north = float(parts[2])
                   south = float(parts[3])
-                  iso_time = parts[0].replace('_', 'T') + ':00Z'
+                  iso_time = parts[0].replace("_", "T") + ":00Z"
                   readings.append({"time": iso_time, "north": north, "south": south})
               except ValueError:
                   continue
-          print(json.dumps(readings))
-          PYEOF
-          )
 
-          # Load or init history JSON
-          mkdir -p data
-          if [ -f "$DATA_FILE" ]; then
-            HISTORY=$(cat "$DATA_FILE")
-          else
-            HISTORY='{"updated_at":"","days":{}}'
-          fi
+          now = datetime.now(timezone.utc)
+          today = now.strftime("%Y-%m-%d")
+          now_str = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+          cutoff = (now - timedelta(days=DAYS_TO_KEEP)).strftime("%Y-%m-%d")
 
-          # Upsert today and prune old days using Python
-          python3 - <<PYEOF
-          import json, sys
-
-          today = "$TODAY"
-          cutoff = "$CUTOFF"
-          now = "$NOW"
-          readings = json.loads('''$READINGS''')
-          history = json.loads('''$HISTORY''')
+          os.makedirs("data", exist_ok=True)
+          if os.path.exists(DATA_FILE):
+              with open(DATA_FILE) as f:
+                  history = json.load(f)
+          else:
+              history = {"updated_at": "", "days": {}}
 
           days = history.get("days", {})
-          days[today] = {"date": today, "captured_at": now, "readings": readings}
-
-          # Prune entries older than cutoff
+          days[today] = {"date": today, "captured_at": now_str, "readings": readings}
           days = {k: v for k, v in days.items() if k >= cutoff}
 
-          result = {"updated_at": now, "days": days}
-          with open("$DATA_FILE", "w") as f:
-              json.dump(result, f, separators=(',', ':'))
+          result = {"updated_at": now_str, "days": days}
+          with open(DATA_FILE, "w") as f:
+              json.dump(result, f, separators=(",", ":"))
+
+          print(f"Captured {len(readings)} readings for {today}")
           PYEOF
 
       - name: Commit and push
