@@ -2,7 +2,7 @@ name: Capture Hemispheric Power
 
 on:
   schedule:
-    - cron: '58 23 * * *'
+    - cron: '0 */2 * * *'
   workflow_dispatch:
 
 jobs:
@@ -10,6 +10,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
     steps:
       - name: Checkout repo
@@ -58,14 +60,21 @@ jobs:
               history = {"updated_at": "", "days": {}}
 
           days = history.get("days", {})
-          days[today] = {"date": today, "captured_at": now_str, "readings": readings}
+
+          # Merge readings by timestamp into today's entry so runs accumulate
+          existing = {r["time"]: r for r in days.get(today, {}).get("readings", [])}
+          for r in readings:
+              existing[r["time"]] = r
+          merged = sorted(existing.values(), key=lambda r: r["time"])
+
+          days[today] = {"date": today, "captured_at": now_str, "readings": merged}
           days = {k: v for k, v in days.items() if k >= cutoff}
 
           result = {"updated_at": now_str, "days": days}
           with open(DATA_FILE, "w") as f:
               json.dump(result, f, separators=(",", ":"))
 
-          print(f"Captured {len(readings)} readings for {today}")
+          print(f"Captured {len(readings)} readings, {len(merged)} total for {today}")
           PYEOF
 
       - name: Commit and push
@@ -73,5 +82,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add data/hemispheric_power_history.json
-          git diff --cached --quiet || git commit -m "chore: capture hemispheric power $(date -u +%Y-%m-%d)"
+          git diff --cached --quiet || git commit -m "chore: capture hemispheric power $(date -u +%Y-%m-%dT%H:%M:%SZ)"
           git push
