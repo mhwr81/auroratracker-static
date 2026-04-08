@@ -20,6 +20,7 @@ By using AuroraTracker, you agree to the collection and use of information in ac
 - **Purpose:** To notify you when geomagnetic storms reach your selected threshold
 - **Control:** You can disable notifications anytime in app settings
 
+
 ### Usage Data
 - **Device Information:** Basic device type for responsive design optimization
 - **App Performance:** Crash logs and performance metrics for improvement
@@ -48,6 +49,7 @@ By using AuroraTracker, you agree to the collection and use of information in ac
 - **NASA CCMC:** Coronal Mass Ejection tracking
 - **CACTUS CME Catalog:** Solar event database
 - **Nominatim/OpenStreetMap:** Location name lookup (when needed)
+- **RETENTION** data is retained on-device until deletion or uninstall
 
 ### We DO NOT
 - Sell your personal information to any third parties
