@@ -1,0 +1,201 @@
+name: Capture Hemispheric Power
+
+on:
+  schedule:
+    # Off-peak minutes: GitHub throttles free-tier scheduled runs hardest at
+    # ":00", which was delaying these captures by 20-110 minutes.
+    - cron: '37 */2 * * *'
+    # This near-midnight run is load-bearing. NOAA's file is bucketed by
+    # OBSERVATION date and resets at 00:00 UTC, but valid times run ~1h ahead,
+    # so the first hour of any day's valid-time series exists only in the
+    # previous day's file. Miss this run and that hour is gone permanently.
+    - cron: '52 23 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: capture-hemi-power
+  cancel-in-progress: false
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Fetch and update hemispheric power data
+        run: |
+          python3 << 'PYEOF'
+          import urllib.request, json, os, re, sys
+          from datetime import datetime, timezone, timedelta
+
+          NOAA_URL     = "https://services.swpc.noaa.gov/text/aurora-nowcast-hemi-power.txt"
+          DATA_FILE    = "data/hemispheric_power_history.json"
+          DAYS_TO_KEEP = 3
+          SCHEMA       = 2
+          TIME_RE      = re.compile(r"\d{4}-\d{2}-\d{2}_\d{2}:\d{2}")
+          ISO_FMT      = "%Y-%m-%dT%H:%M:%SZ"
+          # Nominal L1 -> Earth lag, used only to migrate pre-schema-2 rows.
+          LEGACY_LAG   = timedelta(minutes=62)
+
+          # -- Fetch and parse -------------------------------------------------
+          req = urllib.request.Request(NOAA_URL, headers={"User-Agent": "AuroraTracker/1.0"})
+          with urllib.request.urlopen(req, timeout=15) as resp:
+              raw = resp.read().decode("utf-8")
+
+          readings = []
+          skipped  = 0
+          for line in raw.splitlines():
+              line = line.strip()
+              if not line or line.startswith("#") or line.startswith("-"):
+                  continue
+              parts = re.split(r"\s+", line)
+              if len(parts) < 4:
+                  skipped += 1
+                  continue
+              # parts[0] = observation time (when the L1 solar wind sample was taken)
+              # parts[1] = forecast/valid time at Earth. OVATION Prime recomputes
+              #            this offset per row from the observed wind speed
+              #            (~62-66 min), so the valid time is the one that belongs
+              #            on a chart time axis. Observation time is retained as
+              #            obs_time for debugging only.
+              if not TIME_RE.fullmatch(parts[1]):
+                  skipped += 1
+                  continue
+              try:
+                  north = float(parts[2])
+                  south = float(parts[3])
+              except ValueError:
+                  skipped += 1   # NOAA publishes missing data as "(n/a)"
+                  continue
+              readings.append({
+                  "time":     parts[1].replace("_", "T") + ":00Z",
+                  "obs_time": parts[0].replace("_", "T") + ":00Z",
+                  "north":    north,
+                  "south":    south,
+              })
+
+          if not readings:
+              # NOAA unreachable, or the file was just reset at midnight UTC.
+              # Leave history untouched rather than clobbering it.
+              print("::warning::No readings parsed from NOAA feed; history left unchanged.")
+              sys.exit(0)
+
+          now     = datetime.now(timezone.utc)
+          now_str = now.strftime(ISO_FMT)
+          cutoff  = (now - timedelta(days=DAYS_TO_KEEP)).strftime("%Y-%m-%d")
+
+          os.makedirs("data", exist_ok=True)
+          try:
+              with open(DATA_FILE) as f:
+                  history = json.load(f)
+          except (FileNotFoundError, json.JSONDecodeError):
+              history = {}
+
+          days = history.get("days") or {}
+
+          # -- One-time migration of pre-schema-2 data -------------------------
+          # Legacy rows were keyed by OBSERVATION time. Left alone they would
+          # interleave with new valid-time rows ~1h apart, doubling the bar
+          # count instead of deduplicating. Shift them onto the same axis and
+          # flag them, so the merge below can prefer real rows where it has any.
+          if history.get("schema") != SCHEMA:
+              migrated = {}
+              for day in days.values():
+                  for r in day.get("readings", []):
+                      try:
+                          t = datetime.strptime(r["time"], ISO_FMT).replace(tzinfo=timezone.utc)
+                      except (KeyError, ValueError):
+                          continue
+                      iso = (t + LEGACY_LAG).strftime(ISO_FMT)
+                      migrated.setdefault(iso[:10], []).append({
+                          "time":     iso,
+                          "obs_time": r["time"],
+                          "north":    r["north"],
+                          "south":    r["south"],
+                          "migrated": True,
+                      })
+              days = {
+                  d: {"date": d, "captured_at": now_str,
+                      "readings": sorted(rows, key=lambda r: r["time"])}
+                  for d, rows in migrated.items()
+              }
+              total = sum(len(v["readings"]) for v in days.values())
+              lag   = int(LEGACY_LAG.total_seconds() // 60)
+              print("Migrated %d legacy row(s) to schema %d by +%d min." % (total, SCHEMA, lag))
+
+          # -- Bucket fresh readings by their own valid date --------------------
+          # Not by the run date: valid times late in the UTC day roll over into
+          # the next day, and bucketing by run date would both misfile them and
+          # duplicate them when the next day's run captures the same rows.
+          by_date = {}
+          for r in readings:
+              by_date.setdefault(r["time"][:10], []).append(r)
+
+          for date, rows in sorted(by_date.items()):
+              rows = sorted(rows, key=lambda r: r["time"])
+              lo, hi = rows[0]["time"], rows[-1]["time"]
+              existing = {}
+              for r in days.get(date, {}).get("readings", []):
+                  # An approximate migrated row inside the freshly captured span
+                  # is superseded by real valid-time rows. Outside that span it
+                  # is the only source we have - e.g. the 00:00-01:00 rows that
+                  # only ever appeared in the previous day's NOAA file.
+                  if r.get("migrated") and lo <= r["time"] <= hi:
+                      continue
+                  existing[r["time"]] = r
+              for r in rows:
+                  existing[r["time"]] = r
+              days[date] = {
+                  "date":        date,
+                  "captured_at": now_str,
+                  "readings":    sorted(existing.values(), key=lambda r: r["time"]),
+              }
+
+          # Keys kept sorted so the committed diff stays minimal and readable.
+          days = {k: v for k, v in sorted(days.items()) if k >= cutoff}
+
+          with open(DATA_FILE, "w") as f:
+              json.dump(
+                  {"updated_at": now_str, "schema": SCHEMA, "days": days},
+                  f,
+                  separators=(",", ":"),
+                  sort_keys=True,
+              )
+
+          print("Parsed %d reading(s) (%d skipped) into %d day bucket(s)." % (
+              len(readings), skipped, len(by_date)))
+          for date in sorted(days):
+              rs  = days[date]["readings"]
+              mig = sum(1 for x in rs if x.get("migrated"))
+              tag = "  (%d migrated)" % mig if mig else ""
+              print("  %s: %4d readings  %s -> %s%s" % (
+                  date, len(rs), rs[0]["time"][11:16], rs[-1]["time"][11:16], tag))
+          PYEOF
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/hemispheric_power_history.json
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+          git commit -m "chore: capture hemispheric power $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          for attempt in 1 2 3; do
+            if git push; then
+              echo "Pushed on attempt $attempt."
+              exit 0
+            fi
+            echo "Push failed (attempt $attempt); rebasing on remote and retrying."
+            git pull --rebase --autostash origin "${GITHUB_REF_NAME}" || true
+            sleep 5
+          done
+          echo "::error::Failed to push after 3 attempts; this capture was lost."
+          exit 1
