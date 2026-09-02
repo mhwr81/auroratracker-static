@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Privacy Policy — AuroraTracker</title>
+<meta name="description" content="How the AuroraTracker app collects, uses and shares your information.">
+<meta name="color-scheme" content="light dark">
+<style>
+  :root {
+    --bg: #ffffff;
+    --surface: #f6f7f9;
+    --text: #1a1c22;
+    --muted: #5a6070;
+    --rule: #e2e5ea;
+    --accent: #2f6bd8;
+    --callout-bg: #eef3fd;
+    --callout-border: #2f6bd8;
+    --max: 46rem;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0e1016;
+      --surface: #171a22;
+      --text: #e6e8ee;
+      --muted: #9aa1b1;
+      --rule: #272b36;
+      --accent: #7aa5f0;
+      --callout-bg: #151c2b;
+      --callout-border: #3c6fd0;
+    }
+  }
+
+  * { box-sizing: border-box; }
+
+  html { -webkit-text-size-adjust: 100%; }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 16px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+          "Helvetica Neue", Arial, sans-serif;
+    padding: 0 1.25rem 5rem;
+  }
+
+  .wrap { max-width: var(--max); margin: 0 auto; }
+
+  header {
+    padding: 3rem 0 1.5rem;
+    border-bottom: 1px solid var(--rule);
+    margin-bottom: 2rem;
+  }
+  header .app {
+    font-size: .8rem;
+    letter-spacing: .09em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin: 0 0 .5rem;
+    font-weight: 600;
+  }
+  h1 { font-size: 1.9rem; line-height: 1.2; margin: 0 0 .75rem; letter-spacing: -.015em; }
+  .updated { color: var(--muted); font-size: .9rem; margin: 0; }
+
+  h2 {
+    font-size: 1.3rem;
+    margin: 2.75rem 0 .9rem;
+    padding-top: 1.75rem;
+    border-top: 1px solid var(--rule);
+    letter-spacing: -.01em;
+  }
+  h2:first-of-type { border-top: 0; padding-top: 0; }
+  h3 { font-size: 1.03rem; margin: 1.9rem 0 .6rem; color: var(--text); }
+
+  p { margin: 0 0 1rem; }
+  ul { margin: 0 0 1.15rem; padding-left: 1.3rem; }
+  li { margin-bottom: .45rem; }
+  strong { font-weight: 650; }
+  a { color: var(--accent); }
+  code {
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-radius: 4px;
+    padding: .08em .38em;
+    font-size: .87em;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+
+  .callout {
+    background: var(--callout-bg);
+    border-left: 3px solid var(--callout-border);
+    border-radius: 0 8px 8px 0;
+    padding: 1.1rem 1.25rem;
+    margin: 0 0 1.25rem;
+  }
+  .callout p:last-child { margin-bottom: 0; }
+
+  /* Wide tables scroll inside their own container rather than the page. */
+  .table-scroll {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    margin: 0 0 1.35rem;
+    border: 1px solid var(--rule);
+    border-radius: 8px;
+  }
+  table { border-collapse: collapse; width: 100%; min-width: 30rem; font-size: .93rem; }
+  th, td { text-align: left; padding: .7rem .85rem; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  th { background: var(--surface); font-weight: 650; white-space: nowrap; }
+  tbody tr:last-child td { border-bottom: 0; }
+
+  footer {
+    margin-top: 3.5rem;
+    padding-top: 1.5rem;
+    border-top: 1px solid var(--rule);
+    color: var(--muted);
+    font-size: .88rem;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <p class="app">AuroraTracker</p>
+  <h1>Privacy Policy</h1>
+  <p class="updated">Last updated: 2 September 2026</p>
+</header>
+
+<p>AuroraTracker ("we," "our," or "us") is committed to protecting your privacy. This Privacy Policy explains what information the AuroraTracker mobile application collects, how it is used, and who it is shared with.</p>
+
+<p>By using AuroraTracker, you agree to the collection and use of information in accordance with this policy.</p>
+
+<h2>The Short Version</h2>
+
+<div class="callout">
+  <p><strong>We operate no servers and hold no database about you.</strong> AuroraTracker runs entirely on your device. There is no AuroraTracker account, no login, and no user profile. Anything the app remembers — your location, your settings, your Hunt Log — is stored in your device's private app storage and is removed when you uninstall.</p>
+</div>
+
+<p>However, the app is not isolated. To do its job it talks directly from your device to third-party services, and two categories of that traffic do carry information about you:</p>
+
+<ul>
+  <li><strong>Your location is sent to weather providers</strong> so the app can tell you whether clouds will spoil tonight's view.</li>
+  <li><strong>Advertising services receive your device's advertising ID</strong> so ads can be served in the free version.</li>
+</ul>
+
+<p>Both are described in detail below.</p>
+
+<h2>Information We Collect</h2>
+
+<h3>Location Data</h3>
+<ul>
+  <li><strong>What:</strong> GPS coordinates (latitude and longitude), or coordinates you enter manually. From these we derive a city name, country name, and geomagnetic latitude.</li>
+  <li><strong>Why:</strong> To calculate aurora visibility, local viewing times, and cloud cover for your position.</li>
+  <li><strong>Where it is stored:</strong> On your device only, in the app's private storage, so the app does not have to re-acquire your position on every launch. We never receive it.</li>
+  <li><strong>Where it is sent:</strong> Your coordinates are transmitted to the weather providers listed under <em>Third-Party Services</em> below, in order to retrieve a cloud-cover forecast for your position. Your coordinates are also passed to your device's built-in geocoding service to convert them into a place name.</li>
+  <li><strong>Control:</strong> Location access is optional. You can deny it and enter coordinates manually, or use the app without location — most features still work. You can revoke the permission at any time in your device settings.</li>
+</ul>
+
+<p>Note that the space weather data sources (NOAA, NASA and the others listed below) are fetched as fixed public files. <strong>Your location is never sent to them.</strong></p>
+
+<h3>Advertising Data (free version only)</h3>
+<ul>
+  <li><strong>What:</strong> Your device's resettable advertising identifier, general device information, and coarse (approximate) location derived by the advertising service.</li>
+  <li><strong>Why:</strong> To display ads, which fund the free version of the app.</li>
+  <li><strong>Who:</strong> Google AdMob. See <em>Third-Party Services</em>.</li>
+  <li><strong>Control:</strong> If you are in the EEA, the UK, or Switzerland, you will be asked for your advertising preferences before ads are shown, and can change that choice at any time from Settings. Purchasing AuroraTracker Pro removes ads entirely. You can also reset or delete your advertising ID in your device's privacy settings.</li>
+</ul>
+
+<h3>Diagnostic and Crash Data</h3>
+<ul>
+  <li><strong>What:</strong> Crash reports, including the error and stack trace, device model, operating system version, and a randomly generated installation identifier. If the app crashes, a short log of recent in-app events is included to help us understand what led to it.</li>
+  <li><strong>Why:</strong> To find and fix defects. This is the only way we learn that the app failed on a real device.</li>
+  <li><strong>Who:</strong> Firebase Crashlytics (Google). See <em>Third-Party Services</em>.</li>
+  <li><strong>What it is not:</strong> Crash reports are not linked to your identity, are not used for advertising, and are not used to build a profile of you.</li>
+</ul>
+
+<h3>Notification Data</h3>
+<ul>
+  <li><strong>Device Token:</strong> A Firebase Cloud Messaging token identifying your device as a recipient for storm alerts.</li>
+  <li><strong>Notification Preferences:</strong> Your alert thresholds and notification settings — stored on your device.</li>
+  <li><strong>Alert History:</strong> Recently received alerts, stored on your device for your reference.</li>
+  <li><strong>Control:</strong> You can disable notifications in the app or revoke the permission in device settings.</li>
+</ul>
+
+<h3>Hunt Log Data (if you use the feature)</h3>
+<ul>
+  <li><strong>What:</strong> Entries you create yourself — timestamp, location name and coordinates, the space weather conditions at that moment, your own notes, and any photos you attach.</li>
+  <li><strong>Where it is stored:</strong> Entirely on your device. Entry details are held in the app's private storage and photos are copied into the app's private documents directory.</li>
+  <li><strong>Sharing:</strong> Nothing leaves your device unless <em>you</em> explicitly tap Share, at which point you choose the recipient app yourself.</li>
+</ul>
+
+<h3>Purchase Data</h3>
+<ul>
+  <li><strong>What:</strong> Whether you hold an active AuroraTracker Pro entitlement.</li>
+  <li><strong>How:</strong> Purchases are handled entirely by Google Play Billing. <strong>We never see or receive your payment card, billing address, or any financial information.</strong> The app only asks Google Play whether a purchase exists.</li>
+</ul>
+
+<h3>What We Do NOT Collect</h3>
+<ul>
+  <li>We do not use analytics and do not record which screens or features you use.</li>
+  <li>We do not track you across other apps or websites.</li>
+  <li>We have no user accounts, so we hold no names, email addresses, or passwords.</li>
+  <li>We do not collect your contacts, calendar, microphone, or camera roll at large — the photo picker returns only the specific images you select.</li>
+</ul>
+
+<h2>Legal Basis for Processing (EEA / UK Users)</h2>
+
+<div class="table-scroll">
+<table>
+  <thead><tr><th>Purpose</th><th>Legal basis</th></tr></thead>
+  <tbody>
+    <tr><td>Aurora forecasting and cloud-cover lookup using your location</td><td>Consent (the location permission you grant), withdrawable at any time</td></tr>
+    <tr><td>Sending storm alert notifications</td><td>Consent (the notification permission you grant)</td></tr>
+    <tr><td>Personalised advertising</td><td>Consent, collected through the in-app consent form</td></tr>
+    <tr><td>Non-personalised advertising</td><td>Legitimate interest in funding a free app</td></tr>
+    <tr><td>Crash and stability reporting</td><td>Legitimate interest in providing a working, secure application</td></tr>
+    <tr><td>Delivering a purchased Pro entitlement</td><td>Performance of a contract</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h2>Third-Party Services</h2>
+
+<h3>Services That Receive Information About You</h3>
+
+<div class="table-scroll">
+<table>
+  <thead><tr><th>Service</th><th>What it receives</th><th>Purpose</th></tr></thead>
+  <tbody>
+    <tr><td><strong>Open-Meteo</strong></td><td>Your latitude and longitude</td><td>Cloud cover and visibility forecast</td></tr>
+    <tr><td><strong>WeatherAPI.com</strong></td><td>Your latitude and longitude</td><td>Extended weather forecast</td></tr>
+    <tr><td><strong>Google AdMob</strong></td><td>Advertising ID, device info, approximate location</td><td>Serving ads in the free version</td></tr>
+    <tr><td><strong>Firebase Cloud Messaging</strong> (Google)</td><td>Device push token</td><td>Delivering storm alerts</td></tr>
+    <tr><td><strong>Firebase Crashlytics</strong> (Google)</td><td>Crash reports, device model, OS version, install ID</td><td>Diagnosing crashes</td></tr>
+    <tr><td><strong>Google Play Billing</strong></td><td>Purchase transaction</td><td>Processing Pro purchases</td></tr>
+    <tr><td><strong>Google Maps</strong> (Pro map view)</td><td>Map viewport and location</td><td>Rendering the interactive aurora map</td></tr>
+    <tr><td><strong>OpenStreetMap tile servers</strong></td><td>Map viewport</td><td>Rendering map tiles in the free map view</td></tr>
+    <tr><td><strong>Your device's geocoding service</strong></td><td>Your coordinates</td><td>Converting coordinates to a place name</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>Each of these providers handles the data it receives under its own privacy policy. Because they are global services, information may be processed in countries outside your own, including the United States.</p>
+
+<h3>Public Data Sources (No Personal Data Sent)</h3>
+
+<p>The following are fetched as fixed public files. They receive no information about you beyond the ordinary network request your device must make to reach them:</p>
+
+<ul>
+  <li><strong>NOAA Space Weather Prediction Center</strong> — space weather measurements and forecasts</li>
+  <li><strong>NASA</strong> (CCMC, ISWA, SDO/AIA) — solar imagery and CME modelling</li>
+  <li><strong>SIDC / Royal Observatory of Belgium</strong> — sunspot and solar event data</li>
+  <li><strong>University of Reading Space Weather Forecast Lab</strong> — solar wind modelling</li>
+  <li><strong>YouTube</strong> — embedded educational video content</li>
+</ul>
+
+<h2>Data Retention</h2>
+
+<div class="table-scroll">
+<table>
+  <thead><tr><th>Data</th><th>Retained</th></tr></thead>
+  <tbody>
+    <tr><td>Location, settings, alert history, Hunt Log</td><td>On your device until you delete the entry, clear app data, or uninstall</td></tr>
+    <tr><td>Cached space weather and weather responses</td><td>Minutes to hours, then automatically expired</td></tr>
+    <tr><td>Crash reports</td><td>Retained by Firebase Crashlytics for up to 90 days</td></tr>
+    <tr><td>Advertising identifiers</td><td>Governed by Google's advertising data policies</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>Because we operate no servers, uninstalling the app removes everything AuroraTracker stored about you on your device.</p>
+
+<h2>Your Rights</h2>
+
+<p>You have the right to access, correct, delete, export, and restrict the processing of your personal data, and to object to processing based on legitimate interests.</p>
+
+<p>In practice, most of these are immediate and in your own hands:</p>
+
+<ul>
+  <li><strong>Access and portability:</strong> Your data lives on your device. Hunt Log entries can be exported and shared from within the app.</li>
+  <li><strong>Deletion:</strong> Delete individual Hunt Log entries in the app, or clear all app data / uninstall to remove everything.</li>
+  <li><strong>Withdraw consent:</strong> Revoke location or notification permissions in device settings at any time. Advertising preferences can be changed under Settings → Privacy → Ad Privacy Options.</li>
+  <li><strong>Object to ads:</strong> Purchase Pro to remove advertising entirely, or reset your advertising ID.</li>
+</ul>
+
+<p>For anything you cannot do yourself — in particular a request to delete crash reports associated with your installation — contact us at <a href="mailto:privacy@auroratracker.app">privacy@auroratracker.app</a>. We will respond within 30 days, as required by the GDPR, and usually much sooner.</p>
+
+<p><strong>If you are in the EEA or UK</strong>, you also have the right to lodge a complaint with your local data protection supervisory authority.</p>
+
+<h2>Data Security</h2>
+
+<ul>
+  <li><strong>Encryption in transit:</strong> All network requests use HTTPS/TLS.</li>
+  <li><strong>On-device storage:</strong> App data is held in private application storage, protected by your device's own sandboxing and encryption.</li>
+  <li><strong>Minimal collection:</strong> We request only what the forecasting features actually need.</li>
+  <li><strong>No central store:</strong> Because we operate no servers and hold no user database, there is no central repository of user data to breach.</li>
+</ul>
+
+<h2>Children's Privacy</h2>
+
+<p>AuroraTracker is a general-audience app for people interested in aurora viewing and space weather. It is not directed at children, and we do not knowingly collect personal information from children under 13 (or under the applicable age of digital consent in your country).</p>
+
+<p>If you believe a child has provided us with personal information, contact <a href="mailto:privacy@auroratracker.app">privacy@auroratracker.app</a> and we will take steps to remove it.</p>
+
+<h2>Device Permissions Explained</h2>
+
+<h3>Location (<code>ACCESS_FINE_LOCATION</code>, <code>ACCESS_COARSE_LOCATION</code>)</h3>
+<ul>
+  <li><strong>Purpose:</strong> Aurora visibility calculations and local cloud-cover forecasts.</li>
+  <li><strong>Scope:</strong> Foreground only. The app does not request background location access.</li>
+  <li><strong>Control:</strong> Optional — coordinates can be entered manually instead.</li>
+</ul>
+
+<h3>Notifications (<code>POST_NOTIFICATIONS</code>)</h3>
+<ul>
+  <li><strong>Purpose:</strong> Required by Android 13+ to display geomagnetic storm alerts.</li>
+  <li><strong>Usage:</strong> Aurora and space weather alerts only. No marketing notifications.</li>
+</ul>
+
+<h3>Boot Completion (<code>RECEIVE_BOOT_COMPLETED</code>)</h3>
+<ul>
+  <li><strong>Purpose:</strong> Re-registers alert monitoring after your device restarts.</li>
+  <li><strong>Privacy:</strong> No personal information is accessed during boot.</li>
+</ul>
+
+<h3>Exact Alarms (<code>SCHEDULE_EXACT_ALARM</code>)</h3>
+<ul>
+  <li><strong>Purpose:</strong> Schedules timely alert checks so storm notifications are not delayed.</li>
+</ul>
+
+<h3>Foreground Service (<code>FOREGROUND_SERVICE</code>)</h3>
+<ul>
+  <li><strong>Purpose:</strong> Allows background space weather checks to complete reliably.</li>
+</ul>
+
+<h3>Wake Lock (<code>WAKE_LOCK</code>)</h3>
+<ul>
+  <li><strong>Purpose:</strong> Keeps the screen awake while you are actively watching live aurora data, and allows background checks to finish.</li>
+</ul>
+
+<h3>Network State (<code>ACCESS_NETWORK_STATE</code>)</h3>
+<ul>
+  <li><strong>Purpose:</strong> Detects whether you are online, so the app can serve cached data instead of failing.</li>
+</ul>
+
+<h3>Storage (<code>WRITE_EXTERNAL_STORAGE</code>)</h3>
+<ul>
+  <li><strong>Purpose:</strong> Saving Hunt Log photos and exported entries on older Android versions.</li>
+</ul>
+
+<h2>Advertising and Consent</h2>
+
+<p>The free version of AuroraTracker displays ads supplied by Google AdMob. Ads are how the free version is funded, and they cannot be switched off within it.</p>
+
+<p>If you are located in the European Economic Area, the United Kingdom, or Switzerland, you will be shown a consent form before any personalised advertising is enabled. You may decline personalised ads and continue using the app exactly as before — you will simply see non-personalised ads instead. You can revisit and change this choice at any time under <strong>Settings → Privacy → Ad Privacy Options</strong>.</p>
+
+<p>You can also limit ad personalisation by resetting or deleting your advertising identifier in your device's privacy settings.</p>
+
+<p>Google's use of advertising data is described in <a href="https://policies.google.com/technologies/partner-sites" rel="noopener">Google's Privacy &amp; Terms</a>.</p>
+
+<p><strong>AuroraTracker Pro removes all advertising</strong>, and with it all advertising-related data collection.</p>
+
+<h2>California Residents (CCPA/CPRA)</h2>
+
+<p>We do not sell personal information, and we do not share personal information for cross-context behavioural advertising in exchange for money. Serving personalised ads through AdMob may nonetheless constitute "sharing" under the CPRA. To opt out, decline personalised ads in the consent form, reset your advertising ID in device settings, or purchase Pro to remove ads entirely.</p>
+
+<p>California residents have the right to know, delete, and correct personal information, and not to be discriminated against for exercising those rights. Contact <a href="mailto:privacy@auroratracker.app">privacy@auroratracker.app</a>.</p>
+
+<h2>Changes to This Policy</h2>
+
+<p>We may update this Privacy Policy to reflect changes in our practices, new features, or legal requirements. Changes will be posted with an updated "Last updated" date. For changes that materially affect your privacy, we will provide additional notice in the app.</p>
+
+<p>Continued use of AuroraTracker after changes take effect constitutes acceptance of the updated policy.</p>
+
+<h2>Contact</h2>
+
+<p><strong>Privacy enquiries and data requests:</strong> <a href="mailto:privacy@auroratracker.app">privacy@auroratracker.app</a></p>
+
+<p><strong>General enquiries:</strong> <a href="mailto:matt@auroratracker.app">matt@auroratracker.app</a></p>
+
+<footer>
+  <p>AuroraTracker — aurora forecasting and space weather alerts.</p>
+</footer>
+
+</div>
+</body>
+</html>
