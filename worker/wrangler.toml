@@ -1,0 +1,19 @@
+name = "aurora-live"
+main = "src/index.js"
+compatibility_date = "2026-09-01"
+
+# Writes straight to the bucket through a binding, so the Worker needs no
+# R2 access key at all. The S3 credentials are only for the GitHub Actions
+# bulk tier, which has no binding available to it.
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "aurora-data"
+
+# Every 3 minutes, matching AuroraProvider's 180-second refresh timer. A
+# faster cadence would update the bundle more often than any client reads
+# it, and would push Class B operations past the R2 free tier for nothing.
+[triggers]
+crons = ["*/3 * * * *"]
+
+[observability]
+enabled = true
