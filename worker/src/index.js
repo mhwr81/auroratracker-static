@@ -295,6 +295,42 @@ export default {
         return Response.json({ error: e.message }, { status: 500 });
       }
     }
+    /**
+     * Fire one real push, for validating the delivery path without waiting
+     * for a storm. Sends the same data-only shape the cron does.
+     *
+     * Guarded by a shared secret and disabled entirely when TEST_PUSH_TOKEN
+     * is unset: this endpoint can wake every install of the app, so an open
+     * one would be a spam vector, not a convenience.
+     */
+    if (url.pathname === "/test-push") {
+      // Trimmed because a secret set by piping through a shell picks up a
+      // trailing newline, and the resulting 403 gives no hint why.
+      const expected = (env.TEST_PUSH_TOKEN || "").trim();
+      if (!expected) {
+        return Response.json({ error: "TEST_PUSH_TOKEN is not set; endpoint disabled" }, { status: 404 });
+      }
+      if ((url.searchParams.get("key") || "").trim() !== expected) {
+        return Response.json({ error: "bad or missing key" }, { status: 403 });
+      }
+
+      const topic = url.searchParams.get("topic") || "storm_g5";
+      const type = (url.searchParams.get("type") || "GST").toUpperCase();
+      const level = url.searchParams.get("level") || "G3";
+      if (!/^(storm_g[1-5]|flare_[cmx])$/.test(topic)) {
+        return Response.json({ error: `refusing unknown topic "${topic}"` }, { status: 400 });
+      }
+
+      try {
+        const sa = loadServiceAccount(env.FCM_SERVICE_ACCOUNT);
+        const data = { event_type: type, level, observed_at: new Date().toISOString() };
+        if (type === "FLR") data.region = url.searchParams.get("region") || "";
+        const id = await sendToCondition(sa, `'${topic}' in topics`, data);
+        return Response.json({ sent: true, topic, data, id });
+      } catch (e) {
+        return Response.json({ sent: false, error: e.message }, { status: 500 });
+      }
+    }
     if (url.pathname === "/fcm-check") {
       try {
         const sa = loadServiceAccount(env.FCM_SERVICE_ACCOUNT);
