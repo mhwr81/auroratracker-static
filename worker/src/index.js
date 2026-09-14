@@ -27,6 +27,9 @@
  * and 64.6 GB a month, flat, for any number of installs.
  */
 
+import { loadServiceAccount, sendToCondition } from "./fcm.js";
+import { latestHp30, latestFlarePeak, readState, decideStorm, decideFlare, commitState } from "./alerts.js";
+
 const MAG_URL = "https://services.swpc.noaa.gov/json/rtsw/rtsw_mag_1m.json";
 const WIND_URL = "https://services.swpc.noaa.gov/json/rtsw/rtsw_wind_1m.json";
 const HEMI_URL = "https://services.swpc.noaa.gov/text/aurora-nowcast-hemi-power.txt";
@@ -222,10 +225,55 @@ async function run(env) {
   return { written: true, bytes: body.length, live, diag };
 }
 
+/**
+ * Evaluate storm and flare thresholds and push to the matching topics.
+ *
+ * Independent of the live.json write on purpose: a feed outage on one side
+ * should not suppress the other, and alerting is the half that matters most.
+ *
+ * ALERTS_ARMED gates the actual send. Until it is set to "true" this logs
+ * exactly what it would have pushed and to which topic condition, so the
+ * rules can be watched against real conditions before any device is woken.
+ */
+async function runAlerts(env) {
+  const armed = env.ALERTS_ARMED === "true";
+  const [sample, peak] = await Promise.all([
+    latestHp30().catch((e) => { console.log(`hp30 failed: ${e.message}`); return null; }),
+    latestFlarePeak().catch((e) => { console.log(`xrs failed: ${e.message}`); return null; }),
+  ]);
+
+  const state = await readState(env.BUCKET);
+  const now = Date.now();
+  const storm = decideStorm(sample, state, now);
+  const flare = decideFlare(peak, state, now);
+
+  for (const [kind, d] of [["storm", storm], ["flare", flare]]) {
+    if (!d.send) { console.log(`${kind}: no send — ${d.reason}`); continue; }
+    const tag = `${kind} ${d.level}${d.escalated ? " (escalated)" : ""} -> ${d.condition}`;
+    if (!armed) { console.log(`DRY RUN would send ${tag}`); continue; }
+    try {
+      const sa = loadServiceAccount(env.FCM_SERVICE_ACCOUNT);
+      const id = await sendToCondition(sa, d.condition, d.data);
+      console.log(`SENT ${tag} — ${id}`);
+    } catch (e) {
+      console.log(`send failed for ${kind}: ${e.message}`);
+      d.send = false; // do not record state for an alert nobody received
+    }
+  }
+
+  // Only commit once a send actually succeeded, so a failed push retries on
+  // the next tick instead of being deduped away by its own state write.
+  if (armed) await commitState(env.BUCKET, state, storm, flare, now);
+  return { armed, storm, flare, sample, peak };
+}
+
 export default {
   async scheduled(event, env, ctx) {
     ctx.waitUntil(
-      run(env).catch((e) => console.log(`run failed: ${e.stack || e.message}`))
+      Promise.allSettled([
+        run(env).catch((e) => console.log(`bundle run failed: ${e.stack || e.message}`)),
+        runAlerts(env).catch((e) => console.log(`alert run failed: ${e.stack || e.message}`)),
+      ])
     );
   },
 
@@ -238,6 +286,22 @@ export default {
     const url = new URL(request.url);
     if (url.pathname === "/health") {
       return new Response("ok", { headers: { "content-type": "text/plain" } });
+    }
+    if (url.pathname === "/alerts") {
+      try {
+        const r = await runAlerts({ ...env, ALERTS_ARMED: "false" });
+        return Response.json(r, { headers: { "cache-control": "no-store" } });
+      } catch (e) {
+        return Response.json({ error: e.message }, { status: 500 });
+      }
+    }
+    if (url.pathname === "/fcm-check") {
+      try {
+        const sa = loadServiceAccount(env.FCM_SERVICE_ACCOUNT);
+        return Response.json({ ok: true, project_id: sa.project_id, client_email: sa.client_email });
+      } catch (e) {
+        return Response.json({ ok: false, error: e.message }, { status: 500 });
+      }
     }
     try {
       const { live, diag } = await build();
