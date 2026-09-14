@@ -343,7 +343,21 @@ export default {
     if (url.pathname === "/alerts") {
       try {
         const r = await runAlerts({ ...env, ALERTS_ARMED: "false" });
-        return Response.json(r, { headers: { "cache-control": "no-store" } });
+        // Report what the CRON would do, which is the question that matters --
+        // this route always dry-runs, so r.armed is false by construction.
+        const raw = env.ALERTS_ARMED;
+        return Response.json(
+          {
+            ...r,
+            cron_would_send: raw === "true",
+            armed_secret: raw === undefined
+              ? "not set"
+              : raw === "true"
+                ? "ok"
+                : `set but does not equal "true" (len ${raw.length}, trimmed "${raw.trim()}")`,
+          },
+          { headers: { "cache-control": "no-store" } }
+        );
       } catch (e) {
         return Response.json({ error: e.message }, { status: 500 });
       }
