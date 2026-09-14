@@ -9,7 +9,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { decideStorm, decideFlare, gLevelForKp, gLevelRank, fluxToClass } from "../src/alerts.js";
+import { decideStorm, decideFlare, decideCme, gLevelForKp, gLevelRank, fluxToClass } from "../src/alerts.js";
 
 const HOUR = 3600_000;
 const T0 = Date.parse("2026-09-14T00:00:00Z");
@@ -129,4 +129,75 @@ test("flux classification matches ApiService._fluxToClass", () => {
   assert.equal(fluxToClass(2.34e-5), "M2.3");
   assert.equal(fluxToClass(9.99e-6), "C10.0");
   assert.equal(fluxToClass(3.8309963201754726e-7), "B3.8");
+});
+
+// ── CME bulletins ──────────────────────────────────────────────────────────
+
+const cme = (id, body, type = "CME") => ({
+  messageID: id,
+  messageType: type,
+  messageBody: body,
+  messageIssueTime: "2026-09-14T00:00:00Z",
+});
+
+test("first run seeds every id and sends nothing", () => {
+  const d = decideCme([cme("a", "Earth impact expected, WATCH issued")], {}, T0);
+  assert.equal(d.send, false, "a fresh install must not fire two days of backlog at once");
+  assert.deepEqual(d.seed, ["a"]);
+});
+
+test("a significant Earth-directed CME reaches both tiers", () => {
+  const state = { cme_seen: [] };
+  const d = decideCme([cme("a", "CME arrival expected. Geomagnetic Storm WARNING.")], state, T0);
+  assert.equal(d.send, true);
+  assert.equal(d.level, "significant");
+  assert.equal(d.condition, "'cme_all' in topics || 'cme_significant' in topics");
+});
+
+test("Earth-directed but unclassified reaches only the all tier", () => {
+  const state = { cme_seen: [] };
+  const d = decideCme([cme("a", "CME observed, possible Earth impact in 48 hours")], state, T0);
+  assert.equal(d.send, true);
+  assert.equal(d.level, "all");
+  assert.equal(d.condition, "'cme_all' in topics");
+  assert.ok(!d.condition.includes("cme_significant"),
+    "a significant-only subscriber must not be woken by an unclassified bulletin");
+});
+
+test("a CME not directed at Earth never sends", () => {
+  const state = { cme_seen: [] };
+  const d = decideCme([cme("a", "CME observed off the west limb, no significant effects")], state, T0);
+  assert.equal(d.send, false);
+  assert.deepEqual(d.seenNext, ["a"], "still recorded, or it is re-examined every tick");
+});
+
+test("an already-seen bulletin is not re-sent", () => {
+  const state = { cme_seen: ["a"] };
+  const d = decideCme([cme("a", "Earth impact WARNING")], state, T0);
+  assert.equal(d.send, false);
+  assert.match(d.reason, /no new/);
+});
+
+test("non-CME message types are ignored", () => {
+  const state = { cme_seen: [] };
+  const d = decideCme([cme("a", "Earth impact WARNING", "FLR")], state, T0);
+  assert.equal(d.send, false);
+});
+
+test("a significant bulletin wins over an unclassified one in the same batch", () => {
+  const state = { cme_seen: [] };
+  const d = decideCme(
+    [cme("a", "possible Earth impact"), cme("b", "Earth arrival, ALERT issued")],
+    state,
+    T0
+  );
+  assert.equal(d.send, true);
+  assert.equal(d.significant, true);
+  assert.deepEqual(d.seenNext.sort(), ["a", "b"]);
+});
+
+test("a missing notifications section is not treated as 'no CMEs'", () => {
+  const d = decideCme(null, { cme_seen: [] }, T0);
+  assert.equal(d.send, false);
+  assert.match(d.reason, /no donki notifications available/);
 });

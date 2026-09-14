@@ -233,7 +233,97 @@ export function decideFlare(peak, state, now = Date.now()) {
   };
 }
 
-export async function commitState(bucket, state, storm, flare, now = Date.now()) {
+/**
+ * Port of NotificationService._handleCmeNotification.
+ *
+ * DONKI bulletins are prose, so the original matches on the text and this
+ * keeps exactly the same substrings -- diverging here would mean the phone
+ * and the server disagreed about what counts as an Earth-directed CME.
+ *
+ *   Earth-directed : body mentions earth, arrival or impact
+ *   Significant    : additionally carries a watch, warning or alert
+ *
+ * Dedup is by DONKI's messageID rather than by time: these are reissued and
+ * revised, and the same event can appear repeatedly with the same ID.
+ *
+ * On first run every ID is recorded and nothing is sent. Without that, the
+ * first tick would fire a notification for each of the last two days of
+ * bulletins at once -- the same guard the client has.
+ */
+export function decideCme(notifications, state, now = Date.now()) {
+  if (!Array.isArray(notifications)) {
+    return { send: false, reason: "no donki notifications available" };
+  }
+
+  const cmes = notifications.filter(
+    (n) => n && String(n.messageType ?? "").toUpperCase() === "CME" && n.messageID
+  );
+  if (cmes.length === 0) return { send: false, reason: "no CME bulletins" };
+
+  const seen = Array.isArray(state.cme_seen) ? state.cme_seen : null;
+  if (seen === null) {
+    return {
+      send: false,
+      reason: `first run — seeding ${cmes.length} ids`,
+      seed: cmes.map((n) => String(n.messageID)),
+    };
+  }
+
+  const seenSet = new Set(seen);
+  const fresh = cmes.filter((n) => !seenSet.has(String(n.messageID)));
+  if (fresh.length === 0) return { send: false, reason: "no new CME bulletins" };
+
+  // Newest first, so the alert describes the most recent bulletin when
+  // several arrive in one tick.
+  fresh.sort((a, b) => String(b.messageIssueTime ?? "").localeCompare(String(a.messageIssueTime ?? "")));
+
+  let chosen = null;
+  let significant = false;
+  for (const n of fresh) {
+    const body = String(n.messageBody ?? "").toLowerCase();
+    const earthDirected =
+      body.includes("earth") || body.includes("arrival") || body.includes("impact");
+    if (!earthDirected) continue;
+    const isSig =
+      body.includes("watch") || body.includes("warning") || body.includes("alert");
+    if (chosen === null || (isSig && !significant)) {
+      chosen = n;
+      significant = isSig;
+    }
+    if (significant) break;
+  }
+
+  // Every fresh id is recorded even when nothing is sent, so a bulletin that
+  // is not Earth-directed is not re-examined on every subsequent tick.
+  const seenNext = fresh.map((n) => String(n.messageID));
+
+  if (chosen === null) {
+    return { send: false, reason: `${fresh.length} new, none Earth-directed`, seenNext };
+  }
+
+  // "significant" subscribers want only classified bulletins; "all" wants
+  // every Earth-directed one. Same at-or-below addressing as storms.
+  const topics = significant ? ["cme_all", "cme_significant"] : ["cme_all"];
+
+  return {
+    send: true,
+    level: significant ? "significant" : "all",
+    significant,
+    condition: topicCondition(topics),
+    seenNext,
+    data: {
+      event_type: "CME",
+      level: significant ? "significant" : "all",
+      message_id: String(chosen.messageID),
+      observed_at: String(chosen.messageIssueTime ?? new Date(now).toISOString()),
+    },
+  };
+}
+
+/** Keep the seen-id list bounded; DONKI issues a handful of CMEs a day. */
+const CME_SEEN_CAP = 200;
+
+export async function commitState(bucket, state, storm, flare, now = Date.now(), cme = null) {
   const next = { ...state };
   if (storm?.clear) {
     delete next.storm_level;
@@ -246,6 +336,15 @@ export async function commitState(bucket, state, storm, flare, now = Date.now())
   if (flare?.send) {
     next.flare_class = flare.level;
     next.flare_time = now;
+  }
+  // Seeding and sending both record ids. So does a non-Earth-directed
+  // bulletin, so it is not re-read on every tick for the next two days.
+  const newIds = cme?.seed ?? cme?.seenNext ?? null;
+  if (newIds && newIds.length > 0) {
+    const merged = [...(Array.isArray(next.cme_seen) ? next.cme_seen : []), ...newIds];
+    next.cme_seen = merged.slice(-CME_SEEN_CAP);
+  } else if (cme && !Array.isArray(next.cme_seen)) {
+    next.cme_seen = [];
   }
   if (JSON.stringify(next) !== JSON.stringify(state)) {
     await writeState(bucket, next);

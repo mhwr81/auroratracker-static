@@ -28,7 +28,7 @@
  */
 
 import { loadServiceAccount, sendToCondition } from "./fcm.js";
-import { latestHp30, latestFlarePeak, readState, decideStorm, decideFlare, commitState } from "./alerts.js";
+import { latestHp30, latestFlarePeak, readState, decideStorm, decideFlare, decideCme, commitState } from "./alerts.js";
 import { publishSlow, buildSlow, slowTierDue } from "./slow.js";
 
 const MAG_URL = "https://services.swpc.noaa.gov/json/rtsw/rtsw_mag_1m.json";
@@ -295,7 +295,22 @@ async function runAlerts(env) {
   const storm = decideStorm(sample, state, now);
   const flare = decideFlare(peak, state, now);
 
-  for (const [kind, d] of [["storm", storm], ["flare", flare]]) {
+  // CME bulletins are read from the already-published slow tier rather than
+  // queried here: DONKI is rate limited and unreliable, and re-fetching it
+  // every 3 minutes to check for something it issues a few times a day would
+  // undo the point of the fan-in. Latency is bounded by the slow tier's
+  // half-hourly refresh, which matches the 30-minute WorkManager poll this
+  // replaces.
+  let cme = { send: false, reason: "slow tier unavailable" };
+  try {
+    const obj = await env.BUCKET.get("v1/slow.json");
+    const slow = obj ? await obj.json() : null;
+    cme = decideCme(slow?.donki?.notifications, state, now);
+  } catch (e) {
+    console.log(`cme read failed: ${e.message}`);
+  }
+
+  for (const [kind, d] of [["storm", storm], ["flare", flare], ["cme", cme]]) {
     if (!d.send) { console.log(`${kind}: no send — ${d.reason}`); continue; }
     const tag = `${kind} ${d.level}${d.escalated ? " (escalated)" : ""} -> ${d.condition}`;
     if (!armed) { console.log(`DRY RUN would send ${tag}`); continue; }
@@ -311,8 +326,10 @@ async function runAlerts(env) {
 
   // Only commit once a send actually succeeded, so a failed push retries on
   // the next tick instead of being deduped away by its own state write.
-  if (armed) await commitState(env.BUCKET, state, storm, flare, now);
-  return { armed, storm, flare, sample, peak };
+  // Seeding and suppression must be recorded even when nothing was sent, or
+  // the first tick would re-examine the same bulletins forever.
+  if (armed) await commitState(env.BUCKET, state, storm, flare, now, cme);
+  return { armed, storm, flare, cme, sample, peak };
 }
 
 export default {
@@ -394,6 +411,57 @@ export default {
         if (type === "FLR") data.region = url.searchParams.get("region") || "";
         const id = await sendToCondition(sa, `'${topic}' in topics`, data);
         return Response.json({ sent: true, topic, data, id });
+      } catch (e) {
+        return Response.json({ sent: false, error: e.message }, { status: 500 });
+      }
+    }
+    /**
+     * Exercise the storm path end to end against a quiet sun.
+     *
+     * Everything here is the production path -- the real GFZ fetch, the real
+     * decideStorm, the real topic addressing, the real FCM send. Only the Kp
+     * NUMBER is substituted, which is the one thing the sun will not provide
+     * on demand. That keeps the test honest about the parts that could
+     * actually be wrong.
+     *
+     * Deliberately runs against EMPTY dedup state and commits nothing. A test
+     * that wrote state would mark a storm "already notified" and suppress the
+     * next real one for three hours -- turning a validation into an outage.
+     */
+    if (url.pathname === "/test-storm") {
+      const expected = (env.TEST_PUSH_TOKEN || "").trim();
+      if (!expected) {
+        return Response.json({ error: "TEST_PUSH_TOKEN is not set; endpoint disabled" }, { status: 404 });
+      }
+      if ((url.searchParams.get("key") || "").trim() !== expected) {
+        return Response.json({ error: "bad or missing key" }, { status: 403 });
+      }
+
+      const kp = Number(url.searchParams.get("kp") ?? "6.5");
+      if (!Number.isFinite(kp) || kp < 0 || kp > 12) {
+        return Response.json({ error: "kp must be 0-12" }, { status: 400 });
+      }
+
+      try {
+        const real = await latestHp30();
+        const sample = { kp, time: real?.time ?? new Date().toISOString() };
+        const decision = decideStorm(sample, {}, Date.now());
+
+        if (!decision.send) {
+          return Response.json({ sent: false, sample, real_kp: real?.kp ?? null, decision });
+        }
+        const sa = loadServiceAccount(env.FCM_SERVICE_ACCOUNT);
+        const id = await sendToCondition(sa, decision.condition, decision.data);
+        return Response.json({
+          sent: true,
+          note: "dedup state deliberately not written",
+          real_kp: real?.kp ?? null,
+          substituted_kp: kp,
+          level: decision.level,
+          condition: decision.condition,
+          data: decision.data,
+          id,
+        });
       } catch (e) {
         return Response.json({ sent: false, error: e.message }, { status: 500 });
       }
