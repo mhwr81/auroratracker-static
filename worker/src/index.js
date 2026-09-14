@@ -113,7 +113,7 @@ async function latestRtsw(url) {
     console.log(`no usable records in ${url}`);
     return null;
   }
-  return { record: sel[sel.length - 1], bytes: raw.length, count: sel.length };
+  return { record: sel[sel.length - 1], records: sel, bytes: raw.length, count: sel.length };
 }
 
 /**
@@ -140,6 +140,45 @@ async function latestHemi() {
   }
   return { north, south, valid_time: valid, observed_time: observed };
 }
+
+/**
+ * Thin a 1-minute series down to something a chart can actually draw.
+ *
+ * The app offers 2h, 6h, 12h, 1d and 3d views and filters client-side from a
+ * single array, so one fixed resolution cannot serve all of them: coarse
+ * enough for 3 days leaves the 2-hour view with a dozen points. So density
+ * varies by age — full rate for the last 6 hours, one sample per 10 minutes
+ * before that. _filterRtswByPeriod trims from the newest end, so a short
+ * window naturally lands entirely inside the dense part.
+ *
+ * Selection is by timestamp rather than index so a gap in the feed does not
+ * shift the boundary.
+ */
+function downsample(records, fields, nowMs) {
+  const DENSE_MS = 6 * 3600_000;
+  const COARSE_MS = 10 * 60_000;
+  const out = [];
+  let lastCoarse = 0;
+
+  for (const r of records) {
+    const t = Date.parse(toIsoZ(r.time_tag));
+    if (Number.isNaN(t)) continue;
+
+    const dense = nowMs - t <= DENSE_MS;
+    if (!dense) {
+      if (t - lastCoarse < COARSE_MS) continue;
+      lastCoarse = t;
+    }
+
+    const row = { time_tag: r.time_tag };
+    for (const f of fields) if (r[f] !== null && r[f] !== undefined) row[f] = r[f];
+    out.push(row);
+  }
+  return out;
+}
+
+const MAG_FIELDS = ["bz_gsm", "bt", "bx_gsm", "by_gsm", "source"];
+const WIND_FIELDS = ["proton_speed", "proton_density", "proton_temperature", "source"];
 
 // ── build + publish ────────────────────────────────────────────────────────
 
@@ -175,6 +214,12 @@ async function build() {
       age_minutes: minutesOld(windTime ?? magTime),
     },
     hemispheric_power: hemi,
+    // Same records ApiService._fetchRtswActiveRecords would have parsed out
+    // of the full file, so every chart builder downstream works unchanged.
+    series: {
+      mag: mag ? downsample(mag.records, MAG_FIELDS, Date.now()) : null,
+      wind: wind ? downsample(wind.records, WIND_FIELDS, Date.now()) : null,
+    },
   };
 
   const diag = {
@@ -182,6 +227,8 @@ async function build() {
     wind_bytes: wind?.bytes ?? 0,
     mag_records: mag?.count ?? 0,
     wind_records: wind?.count ?? 0,
+    mag_points: live.series?.mag?.length ?? 0,
+    wind_points: live.series?.wind?.length ?? 0,
   };
   return { live, diag };
 }
