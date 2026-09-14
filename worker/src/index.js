@@ -29,6 +29,7 @@
 
 import { loadServiceAccount, sendToCondition } from "./fcm.js";
 import { latestHp30, latestFlarePeak, readState, decideStorm, decideFlare, commitState } from "./alerts.js";
+import { publishSlow, buildSlow, slowTierDue } from "./slow.js";
 
 const MAG_URL = "https://services.swpc.noaa.gov/json/rtsw/rtsw_mag_1m.json";
 const WIND_URL = "https://services.swpc.noaa.gov/json/rtsw/rtsw_wind_1m.json";
@@ -320,6 +321,11 @@ export default {
       Promise.allSettled([
         run(env).catch((e) => console.log(`bundle run failed: ${e.stack || e.message}`)),
         runAlerts(env).catch((e) => console.log(`alert run failed: ${e.stack || e.message}`)),
+        // Hours-scale data, so roughly twice an hour rather than every tick.
+        // DONKI especially should be touched as little as the app tolerates.
+        slowTierDue()
+          ? publishSlow(env).catch((e) => console.log(`slow run failed: ${e.stack || e.message}`))
+          : Promise.resolve(),
       ])
     );
   },
@@ -376,6 +382,17 @@ export default {
         return Response.json({ sent: true, topic, data, id });
       } catch (e) {
         return Response.json({ sent: false, error: e.message }, { status: 500 });
+      }
+    }
+    if (url.pathname === "/slow") {
+      try {
+        const slow = await buildSlow(env);
+        return Response.json(
+          { dry_run: true, due_now: slowTierDue(), counts: slow.counts, errors: slow.errors, generated: slow.generated },
+          { headers: { "cache-control": "no-store" } }
+        );
+      } catch (e) {
+        return Response.json({ error: e.message }, { status: 500 });
       }
     }
     if (url.pathname === "/fcm-check") {
