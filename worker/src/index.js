@@ -61,7 +61,25 @@ const UA = { "User-Agent": "AuroraTracker/1.0 (+https://auroratracker.app)" };
 const TIMEOUT_MS = 15000;
 
 const OUT_KEY = "v1/live.json";
-const CACHE_CONTROL = "public, max-age=180, stale-while-revalidate=360";
+
+/**
+ * max-age matches the 3-minute publish cadence: inside that window the edge is
+ * serving the newest object there is, so a shorter TTL would only re-fetch
+ * identical bytes.
+ *
+ * The stale window is 60s, not the 360s it started at. That combination
+ * permitted the edge to answer with something up to NINE minutes old, and it
+ * sat underneath three more layers of the same idea -- a 150s bundle cache and
+ * a 2-minute response cache in the app -- so a reading could be a quarter of an
+ * hour old by the time it was drawn, on a feed that publishes every minute.
+ *
+ * 60s still absorbs the thundering herd at the moment an object expires, which
+ * is all stale-while-revalidate is really for here. The cost is that a request
+ * arriving during a revalidation waits for the origin rather than taking an
+ * instant stale answer, so p99 gets slightly worse in exchange for the p50
+ * being several minutes fresher.
+ */
+const CACHE_CONTROL = "public, max-age=180, stale-while-revalidate=60";
 
 const HEMI_TIME_RE = /^\d{4}-\d{2}-\d{2}_\d{2}:\d{2}$/;
 
