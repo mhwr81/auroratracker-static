@@ -63,7 +63,7 @@ const TIMEOUT_MS = 15000;
 const OUT_KEY = "v1/live.json";
 
 /**
- * max-age matches the 3-minute publish cadence: inside that window the edge is
+ * max-age matches the 2-minute publish cadence: inside that window the edge is
  * serving the newest object there is, so a shorter TTL would only re-fetch
  * identical bytes.
  *
@@ -79,19 +79,33 @@ const OUT_KEY = "v1/live.json";
  * instant stale answer, so p99 gets slightly worse in exchange for the p50
  * being several minutes fresher.
  */
-const CACHE_CONTROL = "public, max-age=180, stale-while-revalidate=60";
+const CACHE_CONTROL = "public, max-age=120, stale-while-revalidate=60";
 
 const HEMI_TIME_RE = /^\d{4}-\d{2}-\d{2}_\d{2}:\d{2}$/;
 
-/**
- * The cron expressions from wrangler.toml, which arrive verbatim as
- * event.cron. Kept as constants so the schedule and the branch cannot drift
- * apart silently — a typo here means a job never runs and nothing errors.
- */
-export const CRON_FAST = "*/3 * * * *";
-export const CRON_ALERTS = "1-59/3 * * * *";
-export const CRON_SLOW = "2,32 * * * *";
-export const CRON_REPAIR = "5,35 * * * *";
+// The cron expressions from wrangler.toml, which arrive verbatim as
+// event.cron. Kept as constants so the schedule and the branch cannot drift
+// apart silently — a typo here means a job never runs and nothing errors.
+//
+// The minutes are chosen so no two jobs ever land together, which is what
+// keeps each inside its own 10 ms. With the fast tier on every EVEN minute,
+// everything else has to be odd, and the arithmetic that guarantees it is:
+//
+//   fast    */2      0,2,4…58        even
+//   alerts  1-59/4   1,5,9…57        odd — step 4 preserves parity
+//   slow    3,35                     odd, ≡3 (mod 4), so never an alert minute
+//   repair  15,47                    odd, ≡3 (mod 4), and not a slow minute
+//
+// A step of 3 cannot be used for alerts any more: it alternates parity
+// (1,4,7,10…) and every second entry would collide with the fast tier.
+//
+// Line comments, not a block: `*/2` contains the sequence that ends a block
+// comment, so writing this schedule inside /** */ silently truncates the file
+// at the word "fast".
+export const CRON_FAST = "*/2 * * * *";
+export const CRON_ALERTS = "1-59/4 * * * *";
+export const CRON_SLOW = "3,35 * * * *";
+export const CRON_REPAIR = "15,47 * * * *";
 
 /**
  * How much hemispheric power history live.json carries.

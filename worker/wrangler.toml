@@ -15,22 +15,28 @@ bucket_name = "aurora-data"
 # deferred work back to the invocation that scheduled it -- and the Worker
 # was dying with `exceededCpu`. Split, each job gets its own 10 ms.
 #
-# The minutes are chosen so no two ever collide: the fast tier is 0 mod 3,
-# alerts are 1 mod 3, and 2/32/5/35 are all 2 mod 3.
+# The fast tier runs on every EVEN minute, so everything else must be odd or
+# it would share an invocation's budget. See the note above CRON_FAST in
+# index.js for the parity arithmetic that guarantees it.
 #
-#   */3      fast tier: 6.5 KB propagated solar wind + 11.6 KB hemi power.
-#            Matches AuroraProvider's 180-second refresh timer -- a faster
-#            cadence would update the bundle more often than any client reads
-#            it and push R2 Class B operations past the free tier for nothing.
-#   1-59/3   storm / flare / CME thresholds, offset one minute so a feed
-#            outage on the bundle side cannot suppress alerting.
-#   2,32     slow tier: DONKI and the hemi archive. Hours-scale data, and
+#   */2      fast tier: 6.5 KB propagated solar wind + 11.6 KB hemi power.
+#            Matches AuroraProvider's 120-second refresh timer. Publishing
+#            faster than the app reads would only rewrite R2 for nobody; the
+#            pair moved from 3 minutes to 2 to cut the sawtooth in the
+#            on-screen "observed through" age, which sat at 10-13 minutes and
+#            now sits at 8-11.
+#   1-59/4   storm / flare / CME thresholds, on odd minutes. Every 4 minutes
+#            rather than 3 because a step of 3 alternates parity and would
+#            collide with the fast tier every other run. The extra minute is
+#            immaterial: Hp30 publishes half-hourly and the flare lookback is
+#            90 minutes, so nothing here resolves faster than the gap.
+#   3,35     slow tier: DONKI and the hemi archive. Hours-scale data, and
 #            DONKI should be touched as little as the app tolerates.
-#   5,35     repair tier: one full RTSW feed per run, mag before the half
+#   15,47    repair tier: one full RTSW feed per run, mag before the half
 #            hour and wind after. ~2.7-2.9 ms of JSON.parse each, which only
 #            fits when it is the sole job in the invocation.
 [triggers]
-crons = ["*/3 * * * *", "1-59/3 * * * *", "2,32 * * * *", "5,35 * * * *"]
+crons = ["*/2 * * * *", "1-59/4 * * * *", "3,35 * * * *", "15,47 * * * *"]
 
 [observability]
 enabled = true
