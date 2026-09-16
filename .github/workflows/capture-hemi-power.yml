@@ -5,11 +5,21 @@ on:
     # Off-peak minutes: GitHub throttles free-tier scheduled runs hardest at
     # ":00", which was delaying these captures by 20-110 minutes.
     - cron: '37 */2 * * *'
-    # This near-midnight run is load-bearing. NOAA's file is bucketed by
+    # These near-midnight runs are load-bearing. NOAA's file is bucketed by
     # OBSERVATION date and resets at 00:00 UTC, but valid times run ~1h ahead,
     # so the first hour of any day's valid-time series exists only in the
-    # previous day's file. Miss this run and that hour is gone permanently.
-    - cron: '52 23 * * *'
+    # previous day's file. Miss these and that hour is gone permanently.
+    #
+    # Three staggered attempts, not one. A single '52 23' entry landed at
+    # 00:13, 00:23 and 00:34 on three consecutive nights -- after the reset,
+    # by which point the rows it exists to save were already gone, which is
+    # why every day in the archive starts at ~01:0x instead of 00:00. The
+    # schedule cannot be made punctual, so it is made redundant: with a
+    # 20-110 min delay at least one of these lands before midnight, and the
+    # merge below is a union by valid time, so the extra runs only add rows.
+    - cron: '10 23 * * *'
+    - cron: '25 23 * * *'
+    - cron: '40 23 * * *'
   workflow_dispatch:
 
 concurrency:
