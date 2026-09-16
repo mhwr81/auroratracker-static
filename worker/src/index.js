@@ -1,35 +1,57 @@
 /**
  * aurora-live — the live tier of the Aurora Tracker fan-in.
  *
- * Runs every 3 minutes, reads the fast-moving space weather feeds once for
- * the whole userbase, and writes a ~300-byte live.json to R2. The CDN serves
- * it from the edge, so upstream load stays constant no matter how many
- * installs there are.
+ * Reads the fast-moving space weather feeds once for the whole userbase and
+ * writes a live.json to R2. The CDN serves it from the edge, so upstream
+ * load stays constant no matter how many installs there are.
  *
- * On reading the whole 4.5 MB of RTSW each run
- * ---------------------------------------------
- * Two smaller routes were tried and both rejected:
+ * Staying inside 10 ms of CPU
+ * ---------------------------
+ * The free plan allows 10 ms of CPU per invocation. The original design did
+ * everything on one 3-minute cron and died with `exceededCpu`: reading both
+ * RTSW files in full costs ~5.6 ms in JSON.parse alone (2.67 ms for 1.46 MB
+ * of mag, 2.91 ms for 2.57 MB of wind), and the bundle, the alerts and the
+ * slow tier were all sharing that single budget through ctx.waitUntil —
+ * which bills to the invocation that scheduled it.
  *
- * 1. HTTP byte ranges. The feeds are newest-first and NOAA sends
- *    `Accept-Ranges: bytes`, and a plain HTTP client does get a 206 with
- *    88x fewer bytes. The Workers runtime STRIPS `Range` from subrequests —
- *    measured: plain, cf-bypass and no-store variants all returned 200 with
- *    the full 1,604,033 bytes and no `content-range`. Do not re-add it
- *    without re-measuring; it fails silently by returning correct values at
- *    full cost.
+ * Two things fixed it, and both matter:
  *
- * 2. The /products/summary/ endpoints (61 bytes for bz and bt). They are
- *    rounded to whole nT — the same sample RTSW reports as bz -1.08, bt 4.05
- *    comes back as -1 and 4. Bz precision is the point of the card.
+ * 1. FOUR CRONS INSTEAD OF ONE. Each trigger is its own invocation with its
+ *    own 10 ms, so the jobs stop competing. They are offset rather than
+ *    simultaneous so that two never land on the same minute.
  *
- * So it reads both files in full. That is still ~347x less load on NOAA than
- * today, where every client pulls the same 4.5 MB for itself: 14,400 requests
- * and 64.6 GB a month, flat, for any number of installs.
+ * 2. THE SOLAR WIND SERIES IS STATE, NOT A RECOMPUTATION. The 3-minute tick
+ *    reads a 6.5 KB propagated feed (0.02 ms) and appends; a full RTSW read
+ *    repairs one feed per hour on its own invocation. See series.js for why
+ *    the small feed is trustworthy and how the repair tier keeps the series
+ *    from drifting.
+ *
+ * On the routes that were tried and rejected
+ * ------------------------------------------
+ * Byte ranges: the Workers runtime STRIPS `Range` from subrequests —
+ * measured, plain/cf-bypass/no-store variants all returned 200 with the full
+ * body and no `content-range`. It fails silently by returning correct values
+ * at full cost, so do not re-add it without re-measuring.
+ *
+ * The /products/summary/ endpoints: rounded to whole nT — the sample RTSW
+ * reports as bz -1.08 comes back as -1. Bz precision is the point of the
+ * card. (The propagated feed now used instead is NOT rounded; it carries the
+ * same values RTSW does, bit for bit.)
  */
 
 import { loadServiceAccount, sendToCondition } from "./fcm.js";
 import { latestHp30, latestFlarePeak, readState, decideStorm, decideFlare, decideCme, commitState } from "./alerts.js";
-import { publishSlow, buildSlow, slowTierDue } from "./slow.js";
+import { publishSlow, buildSlow } from "./slow.js";
+import {
+  MAG_FIELDS,
+  WIND_FIELDS,
+  toIsoZ,
+  fetchPropagated,
+  mergeSeries,
+  rebuildSeries,
+  readSeriesState,
+  writeSeriesState,
+} from "./series.js";
 
 const MAG_URL = "https://services.swpc.noaa.gov/json/rtsw/rtsw_mag_1m.json";
 const WIND_URL = "https://services.swpc.noaa.gov/json/rtsw/rtsw_wind_1m.json";
@@ -40,6 +62,33 @@ const TIMEOUT_MS = 15000;
 
 const OUT_KEY = "v1/live.json";
 const CACHE_CONTROL = "public, max-age=180, stale-while-revalidate=360";
+
+const HEMI_TIME_RE = /^\d{4}-\d{2}-\d{2}_\d{2}:\d{2}$/;
+
+/**
+ * The cron expressions from wrangler.toml, which arrive verbatim as
+ * event.cron. Kept as constants so the schedule and the branch cannot drift
+ * apart silently — a typo here means a job never runs and nothing errors.
+ */
+export const CRON_FAST = "*/3 * * * *";
+export const CRON_ALERTS = "1-59/3 * * * *";
+export const CRON_SLOW = "2,32 * * * *";
+export const CRON_REPAIR = "5,35 * * * *";
+
+/**
+ * How much hemispheric power history live.json carries.
+ *
+ * NOAA's file holds only the current UTC day, so at 00:05 it is one hour
+ * long. Carrying a rolling window across that reset is the point: the
+ * multi-day archive comes from a GitHub Action that runs a handful of times
+ * a day and has been observed 8 hours behind, and the hole between where the
+ * archive ends and where the reset file starts was showing up as a
+ * multi-hour gap in the chart every midnight UTC.
+ *
+ * 30 hours covers the worst capture lag seen with room to spare, at ~360
+ * rows -- a couple of KB once the edge compresses it.
+ */
+const HEMI_WINDOW_MS = 30 * 3600_000;
 
 // ── parsing helpers ────────────────────────────────────────────────────────
 
@@ -78,15 +127,12 @@ function activeRecords(records) {
     const fallback = all[0].source;
     sel = all.filter((e) => e.source === fallback);
   }
-  sel.sort((a, b) => String(a.time_tag).localeCompare(String(b.time_tag)));
+  // Fixed-width ISO strings, so byte order is chronological order.
+  sel.sort((a, b) => {
+    const x = String(a.time_tag), y = String(b.time_tag);
+    return x < y ? -1 : x > y ? 1 : 0;
+  });
   return sel;
-}
-
-/** NOAA emits `2026-09-14T01:59:00` with no zone. It is always UTC. */
-function toIsoZ(timeTag) {
-  if (!timeTag) return null;
-  const s = String(timeTag);
-  return s.endsWith("Z") ? s : s + "Z";
 }
 
 function minutesOld(isoZ) {
@@ -106,132 +152,158 @@ async function get(url) {
   return res.text();
 }
 
-/** Newest record from the operational satellite. */
-async function latestRtsw(url) {
-  const raw = await get(url);
-  const sel = activeRecords(JSON.parse(raw));
-  if (sel.length === 0) {
-    console.log(`no usable records in ${url}`);
-    return null;
-  }
-  return { record: sel[sel.length - 1], records: sel, bytes: raw.length, count: sel.length };
+/**
+ * res.json() rather than JSON.parse(await res.text()). The two-step version
+ * materialises the whole body as a JS string first and then walks it again;
+ * on the 2.57 MB wind feed that intermediate string is not free, and the
+ * only thing it bought was a byte count for the log line.
+ */
+async function getJson(url) {
+  const res = await fetch(url, {
+    headers: { ...UA },
+    signal: AbortSignal.timeout(TIMEOUT_MS),
+    cf: { cacheTtl: 0, cacheEverything: false },
+  });
+  if (!res.ok) throw new Error(`${url} -> HTTP ${res.status}`);
+  return res.json();
 }
 
+// ── hemispheric power ──────────────────────────────────────────────────────
+
 /**
- * Latest hemispheric power. Rows are keyed by column 2, NOAA's forecast
- * valid time at Earth, not the L1 observation time in column 1 — so the
- * tail of this file runs about an hour into the future by design.
+ * Hemispheric power: the latest reading, and the whole current-day series.
  *
- * The file resets at 00:00 UTC and holds only the current day. Continuity
- * across that boundary is the capture job's responsibility, not this one's.
+ * Rows are keyed by column 2, NOAA's forecast valid time at Earth, not the
+ * L1 observation time in column 1, so the tail of this file runs about an
+ * hour into the future by design.
+ *
+ * The file resets at 00:00 UTC and holds only the current day -- mergeHemi
+ * carries the series across that. What nobody can recover is the first ~66
+ * minutes of valid times after a reset: those rows exist only in the
+ * PREVIOUS day's file, which is what the capture job's near-midnight runs
+ * are for.
+ *
+ * Rows missing north or south are dropped rather than published as nulls.
+ * NOAA writes those as "(n/a)" and an earlier version took the last line
+ * unconditionally, publishing a null pair whenever the file ended on one.
+ *
+ * At 11.6 KB and 0.06 ms this is cheap enough to keep on the 3-minute tick.
  */
 async function latestHemi() {
   const body = await get(HEMI_URL);
-  let north = null, south = null, valid = null, observed = null;
+  const series = [];
+  let validRaw = null, observedRaw = null;
 
   for (const line of body.split("\n")) {
     const t = line.trim();
     if (!t || t.startsWith("#") || t.startsWith("-")) continue;
     const p = t.split(/\s+/);
     if (p.length < 4) continue;
-    observed = p[0];
-    valid = p[1];
-    north = parseDouble(p[2]);
-    south = parseDouble(p[3]);
+    if (!HEMI_TIME_RE.test(p[0]) || !HEMI_TIME_RE.test(p[1])) continue;
+    const north = parseDouble(p[2]);
+    const south = parseDouble(p[3]);
+    if (north === null || south === null) continue;
+
+    observedRaw = p[0];
+    validRaw = p[1];
+    series.push({
+      time: `${p[1].replace("_", "T")}:00Z`,
+      obs_time: `${p[0].replace("_", "T")}:00Z`,
+      north,
+      south,
+    });
   }
-  return { north, south, valid_time: valid, observed_time: observed };
+
+  if (series.length === 0) throw new Error("hemi feed carried no usable rows");
+  const last = series[series.length - 1];
+  return {
+    latest: { north: last.north, south: last.south, valid_time: validRaw, observed_time: observedRaw },
+    series,
+  };
 }
 
 /**
- * Thin a 1-minute series down to something a chart can actually draw.
+ * Carry the published series across NOAA's 00:00 UTC reset.
  *
- * The app offers 2h, 6h, 12h, 1d and 3d views and filters client-side from a
- * single array, so one fixed resolution cannot serve all of them: coarse
- * enough for 3 days leaves the 2-hour view with a dozen points. So density
- * varies by age — full rate for the last 6 hours, one sample per 10 minutes
- * before that. _filterRtswByPeriod trims from the newest end, so a short
- * window naturally lands entirely inside the dense part.
+ * Keyed by valid time with fresh rows winning: OVATION recomputes the
+ * L1->Earth lag per row from the observed wind speed, so a row can be
+ * republished at a slightly different valid time, and the newer file is the
+ * better answer.
  *
- * Selection is by timestamp rather than index so a gap in the feed does not
- * shift the boundary.
+ * The cutoff is a lower bound only. The last ~hour of the series is
+ * OVATION's forecast and is legitimately in the future, so trimming at both
+ * ends would discard that tail on every run.
  */
-function downsample(records, fields, nowMs) {
-  const DENSE_MS = 6 * 3600_000;
-  const COARSE_MS = 10 * 60_000;
-  const out = [];
-  let lastCoarse = 0;
-
-  for (const r of records) {
-    const t = Date.parse(toIsoZ(r.time_tag));
-    if (Number.isNaN(t)) continue;
-
-    const dense = nowMs - t <= DENSE_MS;
-    if (!dense) {
-      if (t - lastCoarse < COARSE_MS) continue;
-      lastCoarse = t;
-    }
-
-    const row = { time_tag: r.time_tag };
-    for (const f of fields) if (r[f] !== null && r[f] !== undefined) row[f] = r[f];
-    out.push(row);
+function mergeHemi(prev, fresh, nowMs) {
+  const cutoff = nowMs - HEMI_WINDOW_MS;
+  const byTime = new Map();
+  for (const r of prev) {
+    const t = Date.parse(r?.time);
+    if (!Number.isNaN(t) && t >= cutoff) byTime.set(r.time, r);
   }
-  return out;
+  for (const r of fresh) byTime.set(r.time, r);
+  return [...byTime.values()].sort((a, b) => (a.time < b.time ? -1 : a.time > b.time ? 1 : 0));
 }
 
-const MAG_FIELDS = ["bz_gsm", "bt", "bx_gsm", "by_gsm", "source"];
-const WIND_FIELDS = ["proton_speed", "proton_density", "proton_temperature", "source"];
+/**
+ * The hemi series as last published, read from live.json.
+ *
+ * Only used to seed a cold internal/series.json, so the 30-hour window
+ * survives the migration off the old layout instead of restarting at one
+ * day's worth of rows. After that first tick, state is the source of truth.
+ */
+async function hemiFromPublished(env) {
+  try {
+    const obj = await env.BUCKET.get(OUT_KEY);
+    if (!obj) return [];
+    const s = (await obj.json())?.series?.hemi;
+    return Array.isArray(s) ? s : [];
+  } catch (e) {
+    console.log(`published hemi read failed: ${e.message}`);
+    return [];
+  }
+}
 
-// ── build + publish ────────────────────────────────────────────────────────
+// ── assembling + publishing live.json ──────────────────────────────────────
 
-async function build() {
-  const [mag, wind, hemi] = await Promise.all([
-    latestRtsw(MAG_URL),
-    latestRtsw(WIND_URL),
-    latestHemi().catch((e) => {
-      console.log(`hemi fetch failed: ${e.message}`);
-      return null;
-    }),
-  ]);
+/**
+ * Build the public bundle from state. Every tier writes state and then calls
+ * this, so the published shape is defined in exactly one place and a repair
+ * tick republishes the same document the fast tick would have.
+ */
+function assembleLive(state) {
+  const l = state.latest ?? {};
+  const magTime = l.mag_time ?? null;
+  const windTime = l.wind_time ?? null;
 
-  const m = mag?.record ?? {};
-  const w = wind?.record ?? {};
-  const magTime = toIsoZ(m.time_tag);
-  const windTime = toIsoZ(w.time_tag);
-
-  const live = {
+  return {
     schema: "v1",
     generated: new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
     solar_wind: {
-      bz: parseDouble(m.bz_gsm),
-      bt: parseDouble(m.bt),
-      bx: parseDouble(m.bx_gsm),
-      by: parseDouble(m.by_gsm),
-      speed: parseDouble(w.proton_speed),
-      density: parseDouble(w.proton_density),
-      temperature: parseWide(w.proton_temperature),
+      bz: parseDouble(l.bz),
+      bt: parseDouble(l.bt),
+      bx: parseDouble(l.bx),
+      by: parseDouble(l.by),
+      speed: parseDouble(l.speed),
+      density: parseDouble(l.density),
+      temperature: parseWide(l.temperature),
       mag_time: magTime,
       wind_time: windTime,
-      source: w.source ?? m.source ?? null,
+      source: state.source ?? null,
       age_minutes: minutesOld(windTime ?? magTime),
     },
-    hemispheric_power: hemi,
-    // Same records ApiService._fetchRtswActiveRecords would have parsed out
-    // of the full file, so every chart builder downstream works unchanged.
+    hemispheric_power: state.hemi_latest ?? null,
+    // Same shape ApiService._fetchRtswActiveRecords would have produced from
+    // the raw feed, so every chart builder downstream works unchanged.
     series: {
-      mag: mag ? downsample(mag.records, MAG_FIELDS, Date.now()) : null,
-      wind: wind ? downsample(wind.records, WIND_FIELDS, Date.now()) : null,
+      mag: state.mag.length > 0 ? state.mag : null,
+      wind: state.wind.length > 0 ? state.wind : null,
+      // Not downsampled: NOAA publishes this at 5-minute cadence already, so
+      // 30 hours is ~360 rows. The app merges it over the capture job's
+      // archive, newest source winning, and draws the result.
+      hemi: state.hemi.length > 0 ? state.hemi : null,
     },
   };
-
-  const diag = {
-    mag_bytes: mag?.bytes ?? 0,
-    wind_bytes: wind?.bytes ?? 0,
-    mag_records: mag?.count ?? 0,
-    wind_records: wind?.count ?? 0,
-    mag_points: live.series?.mag?.length ?? 0,
-    wind_points: live.series?.wind?.length ?? 0,
-  };
-  return { live, diag };
 }
 
 /**
@@ -247,37 +319,170 @@ function publishable(live) {
   return null;
 }
 
-async function run(env) {
-  const started = Date.now();
-  const { live, diag } = await build();
-
+async function publishLive(env, state, label) {
+  const live = assembleLive(state);
   const reject = publishable(live);
   if (reject) {
     console.log(`REFUSED to write: ${reject} — keeping previous ${OUT_KEY}`);
-    return { written: false, reason: reject, live, diag };
+    return { written: false, reason: reject, live };
   }
 
   const body = JSON.stringify(live);
   await env.BUCKET.put(OUT_KEY, body, {
-    httpMetadata: {
-      contentType: "application/json",
-      cacheControl: CACHE_CONTROL,
-    },
+    httpMetadata: { contentType: "application/json", cacheControl: CACHE_CONTROL },
   });
 
   console.log(
-    `wrote ${OUT_KEY} ${body.length}B in ${Date.now() - started}ms — ` +
-      `bz=${live.solar_wind.bz} speed=${live.solar_wind.speed} ` +
-      `age=${live.solar_wind.age_minutes}m read=${diag.mag_bytes + diag.wind_bytes}B`
+    `[${label}] wrote ${OUT_KEY} ${body.length}B — bz=${live.solar_wind.bz} ` +
+      `speed=${live.solar_wind.speed} age=${live.solar_wind.age_minutes}m ` +
+      `mag=${state.mag.length} wind=${state.wind.length} hemi=${state.hemi.length}`
   );
-  return { written: true, bytes: body.length, live, diag };
+  return { written: true, bytes: body.length, live };
 }
+
+// ── the fast tier ──────────────────────────────────────────────────────────
+
+/**
+ * Every 3 minutes: 6.5 KB of solar wind and 11.6 KB of hemispheric power.
+ *
+ * Both fetches are allowed to fail independently and neither failure blanks
+ * anything — state simply keeps what it had. That is the whole reason the
+ * series moved into state: one bad NOAA response used to mean a hole in
+ * every chart, and now it means the window does not advance for a tick.
+ */
+async function tickFast(env) {
+  const started = Date.now();
+  const state = await readSeriesState(env.BUCKET);
+
+  // A cold state is the migration off the old layout. Only the hemi window
+  // is worth rescuing — mag and wind refill from the propagated feed within
+  // the hour and are rebuilt wholesale at the next repair tick anyway.
+  if (state.cold) {
+    state.hemi = await hemiFromPublished(env);
+    console.log(`cold start: seeded ${state.hemi.length} hemi rows from ${OUT_KEY}`);
+  }
+
+  const [sw, hemi] = await Promise.all([
+    fetchPropagated(state.source).catch((e) => {
+      console.log(`propagated fetch failed: ${e.message}`);
+      return null;
+    }),
+    latestHemi().catch((e) => {
+      console.log(`hemi fetch failed: ${e.message}`);
+      return null;
+    }),
+  ]);
+
+  const now = Date.now();
+
+  if (sw) {
+    state.mag = mergeSeries(state.mag, sw.mag, now);
+    state.wind = mergeSeries(state.wind, sw.wind, now);
+    const m = sw.latestMag ?? {};
+    const w = sw.latestWind ?? {};
+    state.latest = {
+      ...state.latest,
+      ...(sw.latestMag && {
+        bz: m.bz_gsm ?? null,
+        bt: m.bt ?? null,
+        bx: m.bx_gsm ?? null,
+        by: m.by_gsm ?? null,
+        mag_time: toIsoZ(m.time_tag),
+      }),
+      ...(sw.latestWind && {
+        speed: w.proton_speed ?? null,
+        density: w.proton_density ?? null,
+        temperature: w.proton_temperature ?? null,
+        wind_time: toIsoZ(w.time_tag),
+      }),
+    };
+  }
+
+  if (hemi) {
+    state.hemi = mergeHemi(state.hemi, hemi.series, now);
+    state.hemi_latest = hemi.latest;
+  }
+
+  await writeSeriesState(env.BUCKET, state);
+  const out = await publishLive(env, state, `fast ${Date.now() - started}ms`);
+  return { ...out, state };
+}
+
+// ── the repair tier ────────────────────────────────────────────────────────
+
+/**
+ * Rebuild ONE feed's series from the full RTSW file, replacing it wholesale.
+ *
+ * One feed per invocation because the two parses together are ~5.6 ms and
+ * the budget is 10 ms; alone, mag is 2.67 ms and wind 2.91 ms, which leaves
+ * comfortable headroom for the merge and the two R2 writes.
+ *
+ * Wholesale replacement rather than a merge is the point. This is what stops
+ * the series being append-only state that can drift from NOAA with no way
+ * back: anything the fast tier got wrong, or missed during an outage longer
+ * than the propagated feed's one-hour memory, is gone within the hour. RTSW
+ * carries 24 hours, which is exactly the window the series keeps.
+ *
+ * This is also the only tier that sees `source` — the satellite id is not in
+ * the propagated feed, so it is parked in state for the fast tier to stamp
+ * onto its rows.
+ */
+async function tickRepair(env, which) {
+  const started = Date.now();
+  const url = which === "mag" ? MAG_URL : WIND_URL;
+  const fields = which === "mag" ? MAG_FIELDS : WIND_FIELDS;
+
+  const state = await readSeriesState(env.BUCKET);
+
+  const sel = activeRecords(await getJson(url));
+  if (sel.length === 0) {
+    console.log(`repair ${which}: no usable records, keeping previous series`);
+    return { repaired: false, which };
+  }
+
+  const newest = sel[sel.length - 1];
+  const source = newest.source ?? state.source ?? null;
+
+  // Replace rather than merge — that is what makes this a repair and not
+  // another append. See rebuildSeries for why it is not mergeSeries([], ...).
+  const rebuilt = rebuildSeries(sel, fields, Date.now(), source);
+
+  state.source = source;
+  state[which] = rebuilt;
+  state.latest = {
+    ...state.latest,
+    ...(which === "mag"
+      ? {
+          bz: newest.bz_gsm ?? null,
+          bt: newest.bt ?? null,
+          bx: newest.bx_gsm ?? null,
+          by: newest.by_gsm ?? null,
+          mag_time: toIsoZ(newest.time_tag),
+        }
+      : {
+          speed: newest.proton_speed ?? null,
+          density: newest.proton_density ?? null,
+          temperature: newest.proton_temperature ?? null,
+          wind_time: toIsoZ(newest.time_tag),
+        }),
+  };
+
+  await writeSeriesState(env.BUCKET, state);
+  const out = await publishLive(env, state, `repair:${which} ${Date.now() - started}ms`);
+  console.log(
+    `repair ${which}: ${sel.length} active -> ${rebuilt.length} points, source=${source}`
+  );
+  return { ...out, repaired: true, which, points: rebuilt.length, state };
+}
+
+// ── alerts ─────────────────────────────────────────────────────────────────
 
 /**
  * Evaluate storm and flare thresholds and push to the matching topics.
  *
- * Independent of the live.json write on purpose: a feed outage on one side
- * should not suppress the other, and alerting is the half that matters most.
+ * On its own cron, offset one minute from the bundle. Independent of the
+ * live.json write on purpose: a feed outage on one side should not suppress
+ * the other, and alerting is the half that matters most.
  *
  * ALERTS_ARMED gates the actual send. Until it is set to "true" this logs
  * exactly what it would have pushed and to which topic condition, so the
@@ -297,10 +502,10 @@ async function runAlerts(env) {
 
   // CME bulletins are read from the already-published slow tier rather than
   // queried here: DONKI is rate limited and unreliable, and re-fetching it
-  // every 3 minutes to check for something it issues a few times a day would
-  // undo the point of the fan-in. Latency is bounded by the slow tier's
-  // half-hourly refresh, which matches the 30-minute WorkManager poll this
-  // replaces.
+  // every few minutes to check for something it issues a few times a day
+  // would undo the point of the fan-in. Latency is bounded by the slow
+  // tier's half-hourly refresh, which matches the 30-minute WorkManager poll
+  // this replaces.
   let cme = { send: false, reason: "slow tier unavailable" };
   try {
     const obj = await env.BUCKET.get("v1/slow.json");
@@ -332,31 +537,59 @@ async function runAlerts(env) {
   return { armed, storm, flare, cme, sample, peak };
 }
 
+// ── entry points ───────────────────────────────────────────────────────────
+
+/** Alternate the two feeds so only one full RTSW parse lands per invocation. */
+function repairTarget(now = new Date()) {
+  return now.getUTCMinutes() < 30 ? "mag" : "wind";
+}
+
 export default {
+  /**
+   * One job per invocation, so each gets its own 10 ms of CPU. Nothing is
+   * wrapped in ctx.waitUntil any more — that billed the deferred work back
+   * to the invocation that scheduled it, which is how three jobs ended up
+   * sharing one budget in the first place.
+   */
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(
-      Promise.allSettled([
-        run(env).catch((e) => console.log(`bundle run failed: ${e.stack || e.message}`)),
-        runAlerts(env).catch((e) => console.log(`alert run failed: ${e.stack || e.message}`)),
-        // Hours-scale data, so roughly twice an hour rather than every tick.
-        // DONKI especially should be touched as little as the app tolerates.
-        slowTierDue()
-          ? publishSlow(env).catch((e) => console.log(`slow run failed: ${e.stack || e.message}`))
-          : Promise.resolve(),
-      ])
-    );
+    switch (event.cron) {
+      case CRON_ALERTS:
+        return void (await runAlerts(env).catch((e) =>
+          console.log(`alert run failed: ${e.stack || e.message}`)
+        ));
+      case CRON_SLOW:
+        return void (await publishSlow(env).catch((e) =>
+          console.log(`slow run failed: ${e.stack || e.message}`)
+        ));
+      case CRON_REPAIR:
+        return void (await tickRepair(env, repairTarget()).catch((e) =>
+          console.log(`repair run failed: ${e.stack || e.message}`)
+        ));
+      case CRON_FAST:
+        return void (await tickFast(env).catch((e) =>
+          console.log(`bundle run failed: ${e.stack || e.message}`)
+        ));
+      default:
+        // An unrecognised schedule means wrangler.toml and this file have
+        // drifted. Do the cheap tick rather than nothing, and say so loudly.
+        console.log(`unmapped cron "${event.cron}" — running fast tier`);
+        return void (await tickFast(env).catch((e) =>
+          console.log(`bundle run failed: ${e.stack || e.message}`)
+        ));
+    }
   },
 
   /**
-   * Dry run for debugging: computes exactly what the cron would write and
-   * returns it, without touching the bucket. Safe to leave public — it only
-   * reads feeds that are already public, and it cannot publish.
+   * Debug routes. Safe to leave public — they only read feeds that are
+   * already public, and the dry-run paths cannot publish.
    */
   async fetch(request, env) {
     const url = new URL(request.url);
+
     if (url.pathname === "/health") {
       return new Response("ok", { headers: { "content-type": "text/plain" } });
     }
+
     if (url.pathname === "/alerts") {
       try {
         const r = await runAlerts({ ...env, ALERTS_ARMED: "false" });
@@ -379,17 +612,19 @@ export default {
         return Response.json({ error: e.message }, { status: 500 });
       }
     }
+
     if (url.pathname === "/slow") {
       try {
         const slow = await buildSlow(env);
         return Response.json(
-          { dry_run: true, due_now: slowTierDue(), counts: slow.counts, errors: slow.errors, generated: slow.generated },
+          { dry_run: true, counts: slow.counts, errors: slow.errors, generated: slow.generated },
           { headers: { "cache-control": "no-store" } }
         );
       } catch (e) {
         return Response.json({ error: e.message }, { status: 500 });
       }
     }
+
     if (url.pathname === "/fcm-check") {
       try {
         const sa = loadServiceAccount(env.FCM_SERVICE_ACCOUNT);
@@ -398,10 +633,48 @@ export default {
         return Response.json({ ok: false, error: e.message }, { status: 500 });
       }
     }
+
+    // Current state, without touching the bucket. `?series=1` includes the
+    // arrays; by default it reports their shape, which is what is usually
+    // being asked and keeps the response readable.
+    if (url.pathname === "/state") {
+      try {
+        const state = await readSeriesState(env.BUCKET);
+        const live = assembleLive(state);
+        return Response.json(
+          {
+            dry_run: true,
+            cold: state.cold,
+            next_repair: repairTarget(),
+            would_publish: publishable(live) === null,
+            reject_reason: publishable(live),
+            counts: { mag: state.mag.length, wind: state.wind.length, hemi: state.hemi.length },
+            span: {
+              mag: span(state.mag, "time_tag"),
+              wind: span(state.wind, "time_tag"),
+              hemi: span(state.hemi, "time"),
+            },
+            live: url.searchParams.get("series") ? live : { ...live, series: undefined },
+          },
+          { headers: { "cache-control": "no-store" } }
+        );
+      } catch (e) {
+        return Response.json({ error: e.message }, { status: 500 });
+      }
+    }
+
+    // Dry run of the cheap feed: what the 3-minute tick would have appended.
     try {
-      const { live, diag } = await build();
+      const state = await readSeriesState(env.BUCKET);
+      const sw = await fetchPropagated(state.source);
       return Response.json(
-        { dry_run: true, would_publish: publishable(live) === null, reject_reason: publishable(live), diag, live },
+        {
+          dry_run: true,
+          fresh_rows: sw.mag.length,
+          latest_mag: sw.latestMag,
+          latest_wind: sw.latestWind,
+          stored: { mag: state.mag.length, wind: state.wind.length, hemi: state.hemi.length },
+        },
         { headers: { "cache-control": "no-store" } }
       );
     } catch (e) {
@@ -409,3 +682,10 @@ export default {
     }
   },
 };
+
+function span(rows, key) {
+  if (!Array.isArray(rows) || rows.length === 0) return null;
+  return { from: rows[0]?.[key] ?? null, to: rows[rows.length - 1]?.[key] ?? null };
+}
+
+export { assembleLive, publishable, activeRecords, mergeHemi, repairTarget, tickFast, tickRepair };

@@ -15,7 +15,16 @@
 import { topicCondition } from "./fcm.js";
 
 const HP30_URL = "https://kp.gfz.de/app/json/";
-const XRAY_URL = "https://services.swpc.noaa.gov/json/goes/primary/xrays-1-day.json";
+/**
+ * The 6-hour X-ray file, not the 1-day one. latestFlarePeak only ever looks
+ * at FLARE_LOOKBACK_MS (90 minutes), so the day file was four times more
+ * data than this reads: 651 KB and 0.93 ms of JSON.parse against 163 KB and
+ * 0.22 ms, on a 10 ms budget.
+ *
+ * This is the alerting copy only. The app fetches xrays-1-day itself for the
+ * flare history it draws, so nothing displayed gets shorter.
+ */
+const XRAY_URL = "https://services.swpc.noaa.gov/json/goes/primary/xrays-6-hour.json";
 const UA = { "User-Agent": "AuroraTracker/1.0 (+https://auroratracker.app)" };
 
 const STATE_KEY = "internal/alert-state.json";

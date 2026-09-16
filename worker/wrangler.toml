@@ -9,11 +9,28 @@ compatibility_date = "2026-09-01"
 binding = "BUCKET"
 bucket_name = "aurora-data"
 
-# Every 3 minutes, matching AuroraProvider's 180-second refresh timer. A
-# faster cadence would update the bundle more often than any client reads
-# it, and would push Class B operations past the R2 free tier for nothing.
+# Four schedules rather than one, because the free plan's 10 ms CPU limit is
+# PER INVOCATION. Running the bundle, the alerts and the slow tier off a
+# single cron made them share one 10 ms budget -- ctx.waitUntil bills the
+# deferred work back to the invocation that scheduled it -- and the Worker
+# was dying with `exceededCpu`. Split, each job gets its own 10 ms.
+#
+# The minutes are chosen so no two ever collide: the fast tier is 0 mod 3,
+# alerts are 1 mod 3, and 2/32/5/35 are all 2 mod 3.
+#
+#   */3      fast tier: 6.5 KB propagated solar wind + 11.6 KB hemi power.
+#            Matches AuroraProvider's 180-second refresh timer -- a faster
+#            cadence would update the bundle more often than any client reads
+#            it and push R2 Class B operations past the free tier for nothing.
+#   1-59/3   storm / flare / CME thresholds, offset one minute so a feed
+#            outage on the bundle side cannot suppress alerting.
+#   2,32     slow tier: DONKI and the hemi archive. Hours-scale data, and
+#            DONKI should be touched as little as the app tolerates.
+#   5,35     repair tier: one full RTSW feed per run, mag before the half
+#            hour and wind after. ~2.7-2.9 ms of JSON.parse each, which only
+#            fits when it is the sole job in the invocation.
 [triggers]
-crons = ["*/3 * * * *"]
+crons = ["*/3 * * * *", "1-59/3 * * * *", "2,32 * * * *", "5,35 * * * *"]
 
 [observability]
 enabled = true

@@ -27,14 +27,10 @@ const UA = { "User-Agent": "AuroraTracker/1.0 (+https://auroratracker.app)" };
 export const SLOW_KEY = "v1/slow.json";
 export const SLOW_CACHE_CONTROL = "public, max-age=1800, stale-while-revalidate=3600";
 
-/**
- * True roughly twice an hour. The cron ticks every 3 minutes for the live
- * tier; none of this data moves that fast, and DONKI in particular should be
- * touched as little as the app can tolerate.
- */
-export function slowTierDue(now = new Date()) {
-  return now.getUTCMinutes() % 30 < 3;
-}
+// The cadence gate that used to live here is gone. This tier has its own cron
+// now ("2,32 * * * *" — CRON_SLOW in index.js) rather than riding the
+// 3-minute live tick and checking the clock, so it runs twice an hour in its
+// own invocation with its own CPU budget instead of borrowing the bundle's.
 
 function ymd(d) {
   return d.toISOString().slice(0, 10);
