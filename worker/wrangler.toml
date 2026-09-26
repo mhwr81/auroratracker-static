@@ -28,8 +28,9 @@ bucket_name = "aurora-data"
 #   1-59/4   storm / flare / CME thresholds, on odd minutes. Every 4 minutes
 #            rather than 3 because a step of 3 alternates parity and would
 #            collide with the fast tier every other run. The extra minute is
-#            immaterial: Hp30 publishes half-hourly and the flare lookback is
-#            90 minutes, so nothing here resolves faster than the gap.
+#            immaterial: NOAA's G-scale moves on 3-hour Kp and the flare
+#            lookback is 90 minutes, so nothing here resolves faster than
+#            the gap.
 #   3,35     slow tier: DONKI and the hemi archive. Hours-scale data, and
 #            DONKI should be touched as little as the app tolerates.
 #   15,47    repair tier: one full RTSW feed per run, mag before the half

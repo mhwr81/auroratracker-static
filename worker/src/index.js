@@ -40,7 +40,7 @@
  */
 
 import { loadServiceAccount, sendToCondition } from "./fcm.js";
-import { latestHp30, latestFlarePeak, readState, decideStorm, decideFlare, decideCme, commitState } from "./alerts.js";
+import { latestNoaaGScale, latestFlarePeak, readState, decideStorm, decideFlare, decideCme, commitState } from "./alerts.js";
 import { publishSlow, buildSlow } from "./slow.js";
 import {
   MAG_FIELDS,
@@ -523,7 +523,7 @@ async function tickRepair(env, which) {
 async function runAlerts(env) {
   const armed = env.ALERTS_ARMED === "true";
   const [sample, peak] = await Promise.all([
-    latestHp30().catch((e) => { console.log(`hp30 failed: ${e.message}`); return null; }),
+    latestNoaaGScale().catch((e) => { console.log(`noaa scales failed: ${e.message}`); return null; }),
     latestFlarePeak().catch((e) => { console.log(`xrs failed: ${e.message}`); return null; }),
   ]);
 

@@ -1,9 +1,15 @@
 /**
  * Storm and flare threshold evaluation, moved off the device.
  *
- * These rules are a port of NotificationService.checkHp30StormAlert and
- * showSolarFlareAlert. They must stay in step with the Dart: a threshold that
- * means one thing on screen and another in a push is worse than no push.
+ * Storms alert on NOAA SWPC's official G-scale -- the same noaa-scales.json
+ * value the app's conditions card displays -- so a push never names a storm
+ * level the app is not showing. Flares are a port of showSolarFlareAlert.
+ * Either way the rule is the same: a threshold that means one thing on screen
+ * and another in a push is worse than no push.
+ *
+ * Storms used to alert on a single 30-minute GFZ Hp30 sample. Hp30 reaching 5
+ * for half an hour is not a G1 by NOAA's definition (3-hour Kp), so users got
+ * "G1" pushes on days the app -- and NOAA -- said G0.
  *
  * What changed in moving here is WHO filters. On-device, every install
  * evaluated its own threshold after fetching. Here the server evaluates once
@@ -14,7 +20,12 @@
 
 import { topicCondition } from "./fcm.js";
 
-const HP30_URL = "https://kp.gfz.de/app/json/";
+/**
+ * NOAA SWPC scales. Key "0" is the latest observed R/S/G levels; "1".."3"
+ * are forecasts and "-1" is yesterday. ApiService.fetchGeomagneticStormLevel
+ * reads the same key for the on-screen G level.
+ */
+const NOAA_SCALES_URL = "https://services.swpc.noaa.gov/products/noaa-scales.json";
 /**
  * The 6-hour X-ray file, not the 1-day one. latestFlarePeak only ever looks
  * at FLARE_LOOKBACK_MS (90 minutes), so the day file was four times more
@@ -29,7 +40,11 @@ const UA = { "User-Agent": "AuroraTracker/1.0 (+https://auroratracker.app)" };
 
 const STATE_KEY = "internal/alert-state.json";
 
-/** Mirrors NotificationService._hp30Cooldown. */
+/**
+ * A repeat of the same level is held back this long. NOAA's G-scale moves on
+ * 3-hour Kp boundaries, so this stops one storm re-announcing itself every
+ * run while it holds.
+ */
 const STORM_COOLDOWN_MS = 3 * 60 * 60 * 1000;
 /** Mirrors showSolarFlareAlert's dedup window. */
 const FLARE_WINDOW_MS = 2 * 60 * 60 * 1000;
@@ -38,17 +53,6 @@ const FLARE_WINDOW_MS = 2 * 60 * 60 * 1000;
 const FLARE_LOOKBACK_MS = 90 * 60 * 1000;
 
 // ── scales (ports of lib/utils/geomagnetic_scale.dart) ──────────────────────
-
-/** NOAA G level for a Kp-like value. G5+ is still G5 severity. */
-export function gLevelForKp(kp) {
-  if (kp < 5) return "G0";
-  if (kp < 6) return "G1";
-  if (kp < 7) return "G2";
-  if (kp < 8) return "G3";
-  if (kp < 9) return "G4";
-  if (kp < 9.5) return "G5";
-  return "G5+";
-}
 
 /**
  * Rank within the five levels NOAA defines. `G5+` ranks as G5 rather than
@@ -81,34 +85,30 @@ export function flareRank(cls) {
 
 // ── feeds ──────────────────────────────────────────────────────────────────
 
-function gfzStamp(d) {
-  return d.toISOString().split(".")[0] + "Z";
+/**
+ * NOAA's latest observed G level, e.g. `{ level: "G1", time: "2026-09-25T15:00:00Z" }`.
+ * Returns null when the feed has no current G entry, so a malformed file is
+ * "no sample" rather than a silent G0 that would clear the dedup state.
+ */
+export async function latestNoaaGScale() {
+  const res = await fetch(NOAA_SCALES_URL, { headers: UA, signal: AbortSignal.timeout(15000) });
+  if (!res.ok) throw new Error(`NOAA scales -> HTTP ${res.status}`);
+  return parseNoaaGScale(await res.json());
 }
 
-/**
- * Newest observed Hp30 sample. GFZ publishes within about an hour of real
- * time, which is what makes this worth reading over NOAA's 3-hourly Kp.
- * Gaps are filled with a negative sentinel rather than dropped.
- */
-export async function latestHp30() {
-  const now = new Date();
-  const start = new Date(now.getTime() - 3 * 60 * 60 * 1000);
-  const url = `${HP30_URL}?start=${gfzStamp(start)}&end=${gfzStamp(now)}&index=Hp30&status=def`;
-
-  const res = await fetch(url, { headers: UA, signal: AbortSignal.timeout(15000) });
-  if (!res.ok) throw new Error(`GFZ Hp30 -> HTTP ${res.status}`);
-  const data = await res.json();
-
-  const values = data.Hp30;
-  const times = data.datetime;
-  if (!Array.isArray(values) || !Array.isArray(times)) return null;
-
-  for (let i = Math.min(values.length, times.length) - 1; i >= 0; i--) {
-    const v = values[i];
-    if (typeof v !== "number" || v < 0) continue;
-    return { kp: v, time: times[i] };
-  }
-  return null;
+/** Split out from the fetch so the tests can feed it a file. */
+export function parseNoaaGScale(data) {
+  const current = data?.["0"];
+  const raw = current?.G?.Scale;
+  if (raw === null || raw === undefined) return null;
+  const n = Number.parseInt(String(raw), 10);
+  if (!Number.isInteger(n) || n < 0 || n > 5) return null;
+  const date = String(current.DateStamp ?? "");
+  const time = String(current.TimeStamp ?? "");
+  return {
+    level: n > 0 ? `G${n}` : "G0",
+    time: date && time ? `${date}T${time}Z` : null,
+  };
 }
 
 /** Peak GOES X-ray flux over the last 90 minutes, 0.1-0.8nm band. */
@@ -158,19 +158,16 @@ async function writeState(bucket, state) {
 // ── decisions ──────────────────────────────────────────────────────────────
 
 /**
- * Port of checkHp30StormAlert's dedup.
+ * Decide whether NOAA's observed G level warrants a push.
  *
- * Hp30 arrives every 30 minutes and routinely wobbles a third of a step
- * either side of a threshold, so without a cooldown a storm parked on a
- * boundary would notify twice an hour all night. An escalation to a higher
- * level still fires immediately; the cooldown only suppresses a repeat of
- * the same level. Dropping to G0 clears the memory so the next storm to
- * cross the line is treated as new.
+ * An escalation to a higher level fires immediately; the cooldown only
+ * suppresses a repeat of the same level. Dropping to G0 clears the memory so
+ * the next storm to cross the line is treated as new.
  */
 export function decideStorm(sample, state, now = Date.now()) {
-  if (!sample) return { send: false, reason: "no hp30 sample" };
+  if (!sample) return { send: false, reason: "no NOAA G-scale sample" };
 
-  const level = gLevelForKp(sample.kp);
+  const level = sample.level;
   if (level === "G0") return { send: false, reason: "below storm level", clear: true };
 
   const rank = gLevelRank(level);
@@ -197,9 +194,8 @@ export function decideStorm(sample, state, now = Date.now()) {
     data: {
       event_type: "GST",
       level,
-      kp: sample.kp.toFixed(2),
-      source: "hp30",
-      observed_at: sample.time,
+      source: "noaa_scales",
+      observed_at: sample.time ?? new Date(now).toISOString(),
     },
   };
 }

@@ -9,26 +9,46 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { decideStorm, decideFlare, decideCme, gLevelForKp, gLevelRank, fluxToClass } from "../src/alerts.js";
+import { decideStorm, decideFlare, decideCme, gLevelRank, fluxToClass, parseNoaaGScale } from "../src/alerts.js";
 
 const HOUR = 3600_000;
 const T0 = Date.parse("2026-09-14T00:00:00Z");
-const hp30 = (kp) => ({ kp, time: "2026-09-14T00:00:00Z" });
+const noaa = (level) => ({ level, time: "2026-09-14T00:00:00Z" });
 const flare = (flux) => ({ flux, class: fluxToClass(flux), time: "2026-09-14T00:00:00Z" });
 
-test("G-scale boundaries match the Dart", () => {
-  assert.equal(gLevelForKp(4.99), "G0");
-  assert.equal(gLevelForKp(5), "G1");
-  assert.equal(gLevelForKp(6), "G2");
-  assert.equal(gLevelForKp(7), "G3");
-  assert.equal(gLevelForKp(8), "G4");
-  assert.equal(gLevelForKp(9), "G5");
-  assert.equal(gLevelForKp(11.33), "G5+"); // Gannon storm peak
+const scales = (g) => ({
+  "0": { DateStamp: "2026-09-25", TimeStamp: "15:00:00", G: { Scale: g, Text: "none" } },
+  "1": { DateStamp: "2026-09-26", TimeStamp: "00:00:00", G: { Scale: "3", Text: "strong" } },
+});
+
+test("NOAA scales: key 0 is the observed level, never a forecast", () => {
+  assert.deepEqual(parseNoaaGScale(scales("0")), { level: "G0", time: "2026-09-25T15:00:00Z" });
+  assert.equal(parseNoaaGScale(scales("1")).level, "G1");
+  assert.equal(parseNoaaGScale(scales("5")).level, "G5");
+});
+
+test("a malformed scales file is no sample, not a G0", () => {
+  assert.equal(parseNoaaGScale({}), null);
+  assert.equal(parseNoaaGScale(scales(null)), null);
+  assert.equal(parseNoaaGScale(scales("x")), null);
+  assert.equal(parseNoaaGScale(scales("7")), null);
+});
+
+test("a quiet day never sends", () => {
+  const d = decideStorm(noaa("G0"), {}, T0);
+  assert.equal(d.send, false);
+  assert.equal(d.clear, true);
+});
+
+test("the push names NOAA as its source", () => {
+  const d = decideStorm(noaa("G1"), {}, T0);
+  assert.equal(d.data.source, "noaa_scales");
+  assert.equal(d.data.level, "G1");
   assert.equal(gLevelRank("G5+"), 4, "G5+ must rank as G5, never -1");
 });
 
 test("a storm addresses its level and every level below, never above", () => {
-  const d = decideStorm(hp30(7.2), {}, T0);
+  const d = decideStorm(noaa("G3"), {}, T0);
   assert.equal(d.send, true);
   assert.equal(d.level, "G3");
   assert.equal(
@@ -39,34 +59,34 @@ test("a storm addresses its level and every level below, never above", () => {
 });
 
 test("G1 addresses only G1 subscribers", () => {
-  const d = decideStorm(hp30(5.1), {}, T0);
+  const d = decideStorm(noaa("G1"), {}, T0);
   assert.equal(d.condition, "'storm_g1' in topics");
 });
 
-test("G5+ still addresses all five levels", () => {
-  const d = decideStorm(hp30(11.33), {}, T0);
+test("G5 addresses all five levels", () => {
+  const d = decideStorm(noaa("G5"), {}, T0);
   assert.equal(d.send, true);
-  assert.equal(d.level, "G5+");
+  assert.equal(d.level, "G5");
   assert.equal(d.condition.split("||").length, 5);
 });
 
 test("the same level inside the cooldown is suppressed", () => {
   const state = { storm_level: "G3", storm_time: T0 };
-  const d = decideStorm(hp30(7.2), state, T0 + 2 * HOUR);
+  const d = decideStorm(noaa("G3"), state, T0 + 2 * HOUR);
   assert.equal(d.send, false);
   assert.match(d.reason, /cooldown/);
 });
 
 test("the same level after the cooldown fires again", () => {
   const state = { storm_level: "G3", storm_time: T0 };
-  const d = decideStorm(hp30(7.2), state, T0 + 3.5 * HOUR);
+  const d = decideStorm(noaa("G3"), state, T0 + 3.5 * HOUR);
   assert.equal(d.send, true);
   assert.equal(d.escalated, false);
 });
 
 test("escalation beats the cooldown", () => {
   const state = { storm_level: "G3", storm_time: T0 };
-  const d = decideStorm(hp30(8.4), state, T0 + 10 * 60_000);
+  const d = decideStorm(noaa("G4"), state, T0 + 10 * 60_000);
   assert.equal(d.send, true);
   assert.equal(d.escalated, true);
   assert.equal(d.level, "G4");
@@ -74,17 +94,17 @@ test("escalation beats the cooldown", () => {
 
 test("a wobble down does not re-notify", () => {
   const state = { storm_level: "G4", storm_time: T0 };
-  const d = decideStorm(hp30(7.1), state, T0 + 30 * 60_000);
+  const d = decideStorm(noaa("G3"), state, T0 + 30 * 60_000);
   assert.equal(d.send, false, "G3 after G4 is the same storm settling, not a new one");
 });
 
 test("dropping to G0 clears the memory so the next storm is new", () => {
-  const quiet = decideStorm(hp30(1.667), { storm_level: "G3", storm_time: T0 }, T0 + HOUR);
+  const quiet = decideStorm(noaa("G0"), { storm_level: "G3", storm_time: T0 }, T0 + HOUR);
   assert.equal(quiet.send, false);
   assert.equal(quiet.clear, true);
 
   // after commitState has cleared it, a fresh G2 fires despite being lower
-  const fresh = decideStorm(hp30(6.2), {}, T0 + 2 * HOUR);
+  const fresh = decideStorm(noaa("G2"), {}, T0 + 2 * HOUR);
   assert.equal(fresh.send, true);
   assert.equal(fresh.level, "G2");
 });
