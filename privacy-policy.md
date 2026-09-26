@@ -1,6 +1,6 @@
 # AuroraTracker Privacy Policy
 
-**Last updated:** 2 September 2026
+**Last updated:** 26 September 2026
 
 AuroraTracker ("we," "our," or "us") is committed to protecting your privacy. This Privacy Policy explains what information the AuroraTracker mobile application collects, how it is used, and who it is shared with.
 
@@ -28,10 +28,11 @@ Both are described in detail below.
 - **What:** GPS coordinates (latitude and longitude), or coordinates you enter manually. From these we derive a city name, country name, and geomagnetic latitude.
 - **Why:** To calculate aurora visibility, local viewing times, and cloud cover for your position.
 - **Where it is stored:** On your device only, in the app's private storage, so the app does not have to re-acquire your position on every launch. We never receive it.
-- **Where it is sent:** Your coordinates are transmitted to the weather providers listed under *Third-Party Services* below, in order to retrieve a cloud-cover forecast for your position. Your coordinates are also passed to your device's built-in geocoding service to convert them into a place name.
+- **Where it is sent:** Your coordinates are transmitted to the weather providers listed under *Third-Party Services* below, in order to retrieve a cloud-cover forecast and current observed sky conditions for your position. Your coordinates are also passed to your device's built-in geocoding service to convert them into a place name.
+- **Nearby clear-sky search (Pro):** On nights with strong aurora activity but cloud at your location, the app may look up cloud forecasts for points 25–75 miles around you, to find the nearest forecast cloud clearing. Those points are sent to the National Weather Service (in the US) or MET Norway (elsewhere). Your exact position is not sent in this search, although your approximate area could be inferred from the points.
 - **Control:** Location access is optional. You can deny it and enter coordinates manually, or use the app without location — most features still work. You can revoke the permission at any time in your device settings.
 
-Note that the space weather data sources (NOAA, NASA and the others listed below) are fetched as fixed public files. **Your location is never sent to them.**
+Note that the space weather data sources (NOAA Space Weather Prediction Center, NASA and the others listed under *Public Data Sources* below) are fetched as fixed public files. **Your location is never sent to them.** The NOAA weather services that do receive location information (the National Weather Service and the Aviation Weather Center) are listed separately under *Services That Receive Information About You*.
 
 ### Advertising Data (free version only)
 
@@ -93,8 +94,10 @@ Note that the space weather data sources (NOAA, NASA and the others listed below
 
 | Service | What it receives | Purpose |
 |---|---|---|
-| **Open-Meteo** | Your latitude and longitude | Cloud cover and visibility forecast |
 | **WeatherAPI.com** | Your latitude and longitude | Extended weather forecast |
+| **National Weather Service** (NOAA, api.weather.gov) | Your latitude and longitude; in the Pro nearby clear-sky search, points 25–75 miles around you | Cloud cover forecast for US locations |
+| **Aviation Weather Center** (NOAA, aviationweather.gov) | An area of roughly 65 miles around your location | Finding the nearest weather station's observed sky conditions |
+| **MET Norway** (api.met.no) — Pro only | Points 25–75 miles around you, outside the US (not your exact position) | Cloud forecasts for the nearby clear-sky search |
 | **Google AdMob** | Advertising ID, device info, approximate location | Serving ads in the free version |
 | **Firebase Cloud Messaging** (Google) | Device push token | Delivering storm alerts |
 | **Firebase Crashlytics** (Google) | Crash reports, device model, OS version, install ID | Diagnosing crashes |
