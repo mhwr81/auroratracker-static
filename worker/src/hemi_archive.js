@@ -1,0 +1,81 @@
+/**
+ * The multi-day hemispheric power archive, built on Cloudflare.
+ *
+ * This replaces the GitHub Action that committed
+ * data/hemispheric_power_history.json. That job only ran a handful of times a
+ * day, was delayed 20-110 min by GitHub's free-tier scheduler, sometimes
+ * skipped runs outright, and needed three staggered near-midnight runs to
+ * catch rows that exist only in the previous day's NOAA file -- which it
+ * still missed often enough that most archived days start at ~01:0x.
+ *
+ * The fast tier already captures the NOAA file every 2 minutes into a 30-hour
+ * rolling window (internal/series.json), so nothing is ever lost across the
+ * 00:00 UTC reset. This folds that window into the archive the slow tier last
+ * published, trims it to DAYS_TO_KEEP, and republishes it in exactly the
+ * shape the Action wrote (schema 2), so the app needs no changes.
+ *
+ * The merge mirrors the Action's Python script: bucket rows by their own
+ * valid date, union by valid time with fresh rows winning, and let real rows
+ * supersede migrated (pre-schema-2) ones inside the freshly covered span.
+ */
+
+import { readSeriesState } from "./series.js";
+
+export const SCHEMA = 2;
+const DAYS_TO_KEEP = 3;
+
+const iso = (ms) => new Date(ms).toISOString().replace(/\.\d{3}Z$/, "Z");
+
+/**
+ * @param prevArchive the hemi_history last published in slow.json (or null)
+ * @param fresh       rows { time, obs_time, north, south } from the 30 h window
+ * @returns the new archive, or null when there is nothing to publish
+ */
+export function mergeArchive(prevArchive, fresh, nowMs) {
+  const now = iso(nowMs);
+  const days = { ...(prevArchive?.schema === SCHEMA ? prevArchive.days : {}) };
+
+  const byDate = {};
+  for (const r of fresh) {
+    if (typeof r?.time !== "string") continue;
+    (byDate[r.time.slice(0, 10)] ??= []).push({
+      time: r.time, obs_time: r.obs_time, north: r.north, south: r.south,
+    });
+  }
+
+  for (const [date, rows] of Object.entries(byDate)) {
+    rows.sort((a, b) => (a.time < b.time ? -1 : a.time > b.time ? 1 : 0));
+    const lo = rows[0].time, hi = rows[rows.length - 1].time;
+    const merged = new Map();
+    for (const r of days[date]?.readings ?? []) {
+      if (r.migrated && lo <= r.time && r.time <= hi) continue;
+      merged.set(r.time, r);
+    }
+    for (const r of rows) merged.set(r.time, r);
+    days[date] = {
+      date,
+      captured_at: now,
+      readings: [...merged.values()].sort((a, b) => (a.time < b.time ? -1 : a.time > b.time ? 1 : 0)),
+    };
+  }
+
+  const cutoff = iso(nowMs - DAYS_TO_KEEP * 86400_000).slice(0, 10);
+  const kept = {};
+  for (const date of Object.keys(days).sort()) if (date >= cutoff) kept[date] = days[date];
+  if (Object.keys(kept).length === 0) return null;
+
+  return { updated_at: now, schema: SCHEMA, days: kept };
+}
+
+/**
+ * Fresh archive for this slow run, or null when the capture window could not
+ * be read -- the caller then keeps the previous archive and marks it stale.
+ */
+export async function buildHemiArchive(bucket, prevArchive, nowMs = Date.now()) {
+  const state = await readSeriesState(bucket);
+  if (state.cold || state.hemi.length === 0) {
+    console.log("hemi archive: capture window unavailable, keeping previous archive");
+    return null;
+  }
+  return mergeArchive(prevArchive, state.hemi, nowMs);
+}

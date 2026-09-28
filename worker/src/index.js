@@ -111,14 +111,14 @@ export const CRON_REPAIR = "15,47 * * * *";
  * How much hemispheric power history live.json carries.
  *
  * NOAA's file holds only the current UTC day, so at 00:05 it is one hour
- * long. Carrying a rolling window across that reset is the point: the
- * multi-day archive comes from a GitHub Action that runs a handful of times
- * a day and has been observed 8 hours behind, and the hole between where the
- * archive ends and where the reset file starts was showing up as a
- * multi-hour gap in the chart every midnight UTC.
+ * long. Carrying a rolling window across that reset is the point, and it is
+ * also the source of the multi-day archive: the slow tier folds this window
+ * into slow.json's hemi_history every 30 minutes (hemi_archive.js), so the
+ * window only has to outlast the gap between two slow runs.
  *
- * 30 hours covers the worst capture lag seen with room to spare, at ~360
- * rows -- a couple of KB once the edge compresses it.
+ * 30 hours is far more than that needs, at ~360 rows -- a couple of KB once
+ * the edge compresses it. It was sized for the GitHub Action that used to
+ * build the archive and was seen running 8 hours behind.
  */
 const HEMI_WINDOW_MS = 30 * 3600_000;
 
@@ -210,10 +210,9 @@ async function getJson(url) {
  * hour into the future by design.
  *
  * The file resets at 00:00 UTC and holds only the current day -- mergeHemi
- * carries the series across that. What nobody can recover is the first ~66
- * minutes of valid times after a reset: those rows exist only in the
- * PREVIOUS day's file, which is what the capture job's near-midnight runs
- * are for.
+ * carries the series across that. The first ~66 minutes of valid times after
+ * a reset exist only in the PREVIOUS day's file; capturing every 2 minutes
+ * means the last pre-reset tick already has them.
  *
  * Rows missing north or south are dropped rather than published as nulls.
  * NOAA writes those as "(n/a)" and an earlier version took the last line
@@ -331,8 +330,8 @@ function assembleLive(state) {
       mag: state.mag.length > 0 ? state.mag : null,
       wind: state.wind.length > 0 ? state.wind : null,
       // Not downsampled: NOAA publishes this at 5-minute cadence already, so
-      // 30 hours is ~360 rows. The app merges it over the capture job's
-      // archive, newest source winning, and draws the result.
+      // 30 hours is ~360 rows. The app merges it over slow.json's
+      // hemi_history archive, newest source winning, and draws the result.
       hemi: state.hemi.length > 0 ? state.hemi : null,
     },
   };

@@ -8,19 +8,19 @@
  * makes that a fixed 48 requests a day regardless of userbase, and lets the
  * key come out of the binary entirely.
  *
- * The hemispheric power history came from raw.githubusercontent.com, which
- * GitHub does not support as a CDN for application traffic and rate limits
- * accordingly. It is republished here from the same file the capture job
- * already commits, so that job needs no changes and keeps its git archive.
+ * The hemispheric power history is built here as well (hemi_archive.js),
+ * from the fast tier's own 2-minute captures. It used to be fetched from a
+ * file a GitHub Action committed, which lagged by hours and dropped the
+ * first hour of most days.
  *
- * Everything is republished VERBATIM. These payloads are small enough that
+ * The DONKI feeds are republished VERBATIM. These payloads are small enough that
  * re-parsing them would buy nothing and risk the server and the app
  * disagreeing about shape -- the failure mode that is hardest to notice.
  */
 
+import { buildHemiArchive } from "./hemi_archive.js";
+
 const DONKI = "https://api.nasa.gov/DONKI";
-const HEMI_HISTORY =
-  "https://raw.githubusercontent.com/mhwr81/auroratracker-static/main/data/hemispheric_power_history.json";
 
 const UA = { "User-Agent": "AuroraTracker/1.0 (+https://auroratracker.app)" };
 
@@ -75,12 +75,24 @@ async function getJson(url, label) {
 
 /**
  * Last published bundle, so a section that fails this run can keep serving
- * the copy that worked. Returns an empty object when there is nothing yet.
+ * the copy that worked. Returns an empty object when there is nothing yet
+ * (or it will not parse), and null when R2 itself could not be read.
+ *
+ * The distinction matters because the hemi archive is carried forward from
+ * here: rebuilding it after a transient read failure would silently cut three
+ * days of history down to the 30-hour capture window.
  */
 async function previousSlow(bucket) {
+  let obj;
   try {
-    const obj = await bucket.get(SLOW_KEY);
-    return obj ? (await obj.json()) ?? {} : {};
+    obj = await bucket.get(SLOW_KEY);
+  } catch (e) {
+    console.log(`previous ${SLOW_KEY} read failed: ${e.message}`);
+    return null;
+  }
+  if (!obj) return {};
+  try {
+    return (await obj.json()) ?? {};
   } catch {
     return {};
   }
@@ -106,18 +118,19 @@ export async function buildSlow(env) {
       return null;
     });
 
-  const [notifications, flr, enlil, hemiHistory] = await Promise.all([
+  const [notifications, flr, enlil, prev] = await Promise.all([
     attempt(getJsonRetry(`${DONKI}/notifications?api_key=${key}&type=all&startDate=${since(2)}&endDate=${ymd(now)}`, "DONKI notifications")),
     attempt(getJsonRetry(`${DONKI}/FLR?api_key=${key}&startDate=${since(7)}&endDate=${ymd(now)}`, "DONKI FLR")),
     attempt(getJsonRetry(`${DONKI}/WSAEnlilSimulations?api_key=${key}&startDate=${since(14)}&endDate=${ymd(now)}`, "DONKI ENLIL")),
-    attempt(getJsonRetry(HEMI_HISTORY, "hemi history")),
+    env.BUCKET ? previousSlow(env.BUCKET) : {},
   ]);
+  if (prev === null) throw new Error(`${SLOW_KEY} unreadable; skipping this run to protect the hemi archive`);
+  const hemiHistory = env.BUCKET ? await buildHemiArchive(env.BUCKET, prev.hemi_history ?? null) : null;
 
   // A failed section keeps whatever was published last rather than becoming
   // null. DONKI drops out for minutes at a time; without this the app would
   // see an empty CME panel and fall back to querying NASA per device --
   // hammering the very endpoint that is already struggling.
-  const prev = env.BUCKET ? await previousSlow(env.BUCKET) : {};
   const keep = (fresh, path, fallbackAge) => {
     if (fresh !== null && fresh !== undefined) return { value: fresh, stale: false };
     const old = path.split(".").reduce((o, k) => (o ?? {})[k], prev);
