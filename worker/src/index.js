@@ -167,6 +167,39 @@ function activeRecords(records) {
   return sel;
 }
 
+const ACTIVE_RE = /"active"\s*:\s*true\b/g;
+
+/**
+ * activeRecords() over the raw RTSW text, parsing only the active
+ * spacecraft's rows.
+ *
+ * The feeds carry every spacecraft (SOLAR1, ACE and IMAP as of Sep 2026), so
+ * two thirds of each file is rows activeRecords() throws away. JSON.parse
+ * builds all of them first, and on the free plan's 10 ms budget that is the
+ * single biggest cost in the repair tier. Records are flat objects, so each
+ * active one is the {...} enclosing its "active": true -- found with a string
+ * scan that is far cheaper than materialising the rows.
+ *
+ * Anything unexpected (no active flag at all, or a shape the scan cannot
+ * slice cleanly) falls back to the full parse, so the result never differs.
+ */
+export function activeRecordsFromText(text) {
+  const parts = [];
+  for (const m of text.matchAll(ACTIVE_RE)) {
+    const start = text.lastIndexOf("{", m.index);
+    const end = text.indexOf("}", m.index);
+    if (start >= 0 && end > start) parts.push(text.slice(start, end + 1));
+  }
+  if (parts.length > 0) {
+    try {
+      return activeRecords(JSON.parse(`[${parts.join(",")}]`));
+    } catch {
+      console.log("active-row scan produced invalid JSON; using full parse");
+    }
+  }
+  return activeRecords(JSON.parse(text));
+}
+
 function minutesOld(isoZ) {
   if (!isoZ) return null;
   const t = Date.parse(isoZ);
@@ -182,22 +215,6 @@ async function get(url) {
   });
   if (!res.ok) throw new Error(`${url} -> HTTP ${res.status}`);
   return res.text();
-}
-
-/**
- * res.json() rather than JSON.parse(await res.text()). The two-step version
- * materialises the whole body as a JS string first and then walks it again;
- * on the 2.57 MB wind feed that intermediate string is not free, and the
- * only thing it bought was a byte count for the log line.
- */
-async function getJson(url) {
-  const res = await fetch(url, {
-    headers: { ...UA },
-    signal: AbortSignal.timeout(TIMEOUT_MS),
-    cf: { cacheTtl: 0, cacheEverything: false },
-  });
-  if (!res.ok) throw new Error(`${url} -> HTTP ${res.status}`);
-  return res.json();
 }
 
 // ── hemispheric power ──────────────────────────────────────────────────────
@@ -444,9 +461,10 @@ async function tickFast(env) {
 /**
  * Rebuild ONE feed's series from the full RTSW file, replacing it wholesale.
  *
- * One feed per invocation because the two parses together are ~5.6 ms and
- * the budget is 10 ms; alone, mag is 2.67 ms and wind 2.91 ms, which leaves
- * comfortable headroom for the merge and the two R2 writes.
+ * One feed per invocation because the budget is 10 ms. The files grew by
+ * half when IMAP joined the feed (mag 1.7 MB, wind 3.0 MB), which pushed
+ * this tier to ~11 ms typical and ~25 ms worst in production; parsing only
+ * the active spacecraft's rows (activeRecordsFromText) roughly halves it.
  *
  * Wholesale replacement rather than a merge is the point. This is what stops
  * the series being append-only state that can drift from NOAA with no way
@@ -465,7 +483,7 @@ async function tickRepair(env, which) {
 
   const state = await readSeriesState(env.BUCKET);
 
-  const sel = activeRecords(await getJson(url));
+  const sel = activeRecordsFromText(await get(url));
   if (sel.length === 0) {
     console.log(`repair ${which}: no usable records, keeping previous series`);
     return { repaired: false, which };
