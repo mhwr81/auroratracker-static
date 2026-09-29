@@ -9,19 +9,27 @@
  * still missed often enough that most archived days start at ~01:0x.
  *
  * The fast tier already captures the NOAA file every 2 minutes into a 30-hour
- * rolling window (internal/series.json), so nothing is ever lost across the
- * 00:00 UTC reset. This folds that window into the archive the slow tier last
- * published, trims it to DAYS_TO_KEEP, and republishes it in exactly the
- * shape the Action wrote (schema 2), so the app needs no changes.
+ * rolling window (internal/hemi.json), so nothing is ever lost across the
+ * 00:00 UTC reset. This folds that window into the archive it last wrote,
+ * trims it to DAYS_TO_KEEP, and writes it in exactly the shape the Action
+ * wrote (schema 2), so the app needs no changes.
+ *
+ * It runs on its own cron (CRON_HEMI) and writes its own object,
+ * v1/hemi_history.json. It first ran inside the slow tier, which made that
+ * tier parse the solar wind state and a 120 KB slow.json on every run and
+ * took it from ~4 ms to 8-13 ms of a 10 ms budget. The slow tier now splices
+ * this object's text into slow.json's hemi_history without parsing it.
  *
  * The merge mirrors the Action's Python script: bucket rows by their own
  * valid date, union by valid time with fresh rows winning, and let real rows
  * supersede migrated (pre-schema-2) ones inside the freshly covered span.
  */
 
-import { readSeriesState } from "./series.js";
+import { readHemiState } from "./series.js";
 
 export const SCHEMA = 2;
+export const ARCHIVE_KEY = "v1/hemi_history.json";
+export const ARCHIVE_CACHE_CONTROL = "public, max-age=1800, stale-while-revalidate=3600";
 const DAYS_TO_KEEP = 3;
 
 const iso = (ms) => new Date(ms).toISOString().replace(/\.\d{3}Z$/, "Z");
@@ -72,10 +80,48 @@ export function mergeArchive(prevArchive, fresh, nowMs) {
  * be read -- the caller then keeps the previous archive and marks it stale.
  */
 export async function buildHemiArchive(bucket, prevArchive, nowMs = Date.now()) {
-  const state = await readSeriesState(bucket);
+  const state = await readHemiState(bucket);
   if (state.cold || state.hemi.length === 0) {
     console.log("hemi archive: capture window unavailable, keeping previous archive");
     return null;
   }
   return mergeArchive(prevArchive, state.hemi, nowMs);
+}
+
+/**
+ * The archive as last written. Returns null when there is none yet (the
+ * caller migrates it out of slow.json) and throws when R2 could not be read,
+ * so a transient failure skips the run instead of rebuilding from the 30-hour
+ * window and silently cutting three days of history down to it.
+ */
+async function previousArchive(bucket) {
+  const obj = await bucket.get(ARCHIVE_KEY);
+  if (obj) return (await obj.json()) ?? null;
+  // One-time migration: before this object existed the archive lived only in
+  // slow.json. A read failure here throws for the same reason as above.
+  const slow = await bucket.get("v1/slow.json");
+  return slow ? ((await slow.json())?.hemi_history ?? null) : null;
+}
+
+/** The CRON_HEMI job. Writes nothing when there is nothing new to fold in. */
+export async function publishHemiArchive(bucket, nowMs = Date.now()) {
+  let prev;
+  try {
+    prev = await previousArchive(bucket);
+  } catch (e) {
+    console.log(`hemi archive: previous archive unreadable (${e.message}); skipping to protect it`);
+    return { written: false };
+  }
+  const archive = await buildHemiArchive(bucket, prev, nowMs);
+  if (!archive) return { written: false };
+
+  const body = JSON.stringify(archive);
+  const days = Object.keys(archive.days).length;
+  await bucket.put(ARCHIVE_KEY, body, {
+    httpMetadata: { contentType: "application/json", cacheControl: ARCHIVE_CACHE_CONTROL },
+    // Read by the slow tier, which embeds this object without parsing it.
+    customMetadata: { days: String(days), updated_at: archive.updated_at },
+  });
+  console.log(`wrote ${ARCHIVE_KEY} ${body.length}B — ${days} days`);
+  return { written: true, body, days, archive };
 }

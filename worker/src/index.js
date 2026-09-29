@@ -41,7 +41,8 @@
 
 import { loadServiceAccount, sendToCondition } from "./fcm.js";
 import { latestNoaaGScale, latestFlarePeak, readState, decideStorm, decideFlare, decideCme, commitState } from "./alerts.js";
-import { publishSlow, buildSlow } from "./slow.js";
+import { publishSlow, buildSlow, readDonki } from "./slow.js";
+import { publishHemiArchive } from "./hemi_archive.js";
 import {
   MAG_FIELDS,
   WIND_FIELDS,
@@ -51,6 +52,8 @@ import {
   rebuildSeries,
   readSeriesState,
   writeSeriesState,
+  readHemiState,
+  writeHemiState,
 } from "./series.js";
 
 const MAG_URL = "https://services.swpc.noaa.gov/json/rtsw/rtsw_mag_1m.json";
@@ -95,6 +98,7 @@ const HEMI_TIME_RE = /^\d{4}-\d{2}-\d{2}_\d{2}:\d{2}$/;
 //   alerts  1-59/4   1,5,9…57        odd — step 4 preserves parity
 //   slow    3,35                     odd, ≡3 (mod 4), so never an alert minute
 //   repair  15,47                    odd, ≡3 (mod 4), and not a slow minute
+//   hemi    27,59                    odd, ≡3 (mod 4), neither of the above
 //
 // A step of 3 cannot be used for alerts any more: it alternates parity
 // (1,4,7,10…) and every second entry would collide with the fast tier.
@@ -106,6 +110,7 @@ export const CRON_FAST = "*/2 * * * *";
 export const CRON_ALERTS = "1-59/4 * * * *";
 export const CRON_SLOW = "3,35 * * * *";
 export const CRON_REPAIR = "15,47 * * * *";
+export const CRON_HEMI = "27,59 * * * *";
 
 /**
  * How much hemispheric power history live.json carries.
@@ -296,8 +301,8 @@ function mergeHemi(prev, fresh, nowMs) {
 /**
  * The hemi series as last published, read from live.json.
  *
- * Only used to seed a cold internal/series.json, so the 30-hour window
- * survives the migration off the old layout instead of restarting at one
+ * Only used to seed a cold internal/hemi.json, so the 30-hour window
+ * survives a migration of the state layout instead of restarting at one
  * day's worth of rows. After that first tick, state is the source of truth.
  */
 async function hemiFromPublished(env) {
@@ -400,14 +405,14 @@ async function publishLive(env, state, label) {
  */
 async function tickFast(env) {
   const started = Date.now();
-  const state = await readSeriesState(env.BUCKET);
+  const [state, hs] = await Promise.all([readSeriesState(env.BUCKET), readHemiState(env.BUCKET)]);
 
-  // A cold state is the migration off the old layout. Only the hemi window
-  // is worth rescuing — mag and wind refill from the propagated feed within
-  // the hour and are rebuilt wholesale at the next repair tick anyway.
-  if (state.cold) {
-    state.hemi = await hemiFromPublished(env);
-    console.log(`cold start: seeded ${state.hemi.length} hemi rows from ${OUT_KEY}`);
+  // A cold hemi state is a migration of the layout. Only the hemi window is
+  // worth rescuing — mag and wind refill from the propagated feed within the
+  // hour and are rebuilt wholesale at the next repair tick anyway.
+  if (hs.cold) {
+    hs.hemi = await hemiFromPublished(env);
+    console.log(`cold start: seeded ${hs.hemi.length} hemi rows from ${OUT_KEY}`);
   }
 
   const [sw, hemi] = await Promise.all([
@@ -447,13 +452,14 @@ async function tickFast(env) {
   }
 
   if (hemi) {
-    state.hemi = mergeHemi(state.hemi, hemi.series, now);
-    state.hemi_latest = hemi.latest;
+    hs.hemi = mergeHemi(hs.hemi, hemi.series, now);
+    hs.hemi_latest = hemi.latest;
   }
 
-  await writeSeriesState(env.BUCKET, state);
-  const out = await publishLive(env, state, `fast ${Date.now() - started}ms`);
-  return { ...out, state };
+  await Promise.all([writeSeriesState(env.BUCKET, state), writeHemiState(env.BUCKET, hs)]);
+  const view = { ...state, hemi: hs.hemi, hemi_latest: hs.hemi_latest };
+  const out = await publishLive(env, view, `fast ${Date.now() - started}ms`);
+  return { ...out, state: view };
 }
 
 // ── the repair tier ────────────────────────────────────────────────────────
@@ -481,7 +487,7 @@ async function tickRepair(env, which) {
   const url = which === "mag" ? MAG_URL : WIND_URL;
   const fields = which === "mag" ? MAG_FIELDS : WIND_FIELDS;
 
-  const state = await readSeriesState(env.BUCKET);
+  const [state, hs] = await Promise.all([readSeriesState(env.BUCKET), readHemiState(env.BUCKET)]);
 
   const sel = activeRecordsFromText(await get(url));
   if (sel.length === 0) {
@@ -517,11 +523,12 @@ async function tickRepair(env, which) {
   };
 
   await writeSeriesState(env.BUCKET, state);
-  const out = await publishLive(env, state, `repair:${which} ${Date.now() - started}ms`);
+  const view = { ...state, hemi: hs.hemi, hemi_latest: hs.hemi_latest };
+  const out = await publishLive(env, view, `repair:${which} ${Date.now() - started}ms`);
   console.log(
     `repair ${which}: ${sel.length} active -> ${rebuilt.length} points, source=${source}`
   );
-  return { ...out, repaired: true, which, points: rebuilt.length, state };
+  return { ...out, repaired: true, which, points: rebuilt.length, state: view };
 }
 
 // ── alerts ─────────────────────────────────────────────────────────────────
@@ -549,17 +556,18 @@ async function runAlerts(env) {
   const storm = decideStorm(sample, state, now);
   const flare = decideFlare(peak, state, now);
 
-  // CME bulletins are read from the already-published slow tier rather than
+  // CME bulletins are read from what the slow tier last fetched rather than
   // queried here: DONKI is rate limited and unreliable, and re-fetching it
   // every few minutes to check for something it issues a few times a day
   // would undo the point of the fan-in. Latency is bounded by the slow
   // tier's half-hourly refresh, which matches the 30-minute WorkManager poll
-  // this replaces.
+  // this replaces. Read from internal/donki.json, not slow.json: slow.json
+  // carries the ~100 KB hemi archive too, and parsing that every 4 minutes
+  // to reach 11 KB of bulletins cost this tier half its CPU again.
   let cme = { send: false, reason: "slow tier unavailable" };
   try {
-    const obj = await env.BUCKET.get("v1/slow.json");
-    const slow = obj ? await obj.json() : null;
-    cme = decideCme(slow?.donki?.notifications, state, now);
+    const donki = await readDonki(env.BUCKET);
+    cme = decideCme(donki?.notifications, state, now);
   } catch (e) {
     console.log(`cme read failed: ${e.message}`);
   }
@@ -609,6 +617,10 @@ export default {
       case CRON_SLOW:
         return void (await publishSlow(env).catch((e) =>
           console.log(`slow run failed: ${e.stack || e.message}`)
+        ));
+      case CRON_HEMI:
+        return void (await publishHemiArchive(env.BUCKET).catch((e) =>
+          console.log(`hemi archive run failed: ${e.stack || e.message}`)
         ));
       case CRON_REPAIR:
         return void (await tickRepair(env, repairTarget()).catch((e) =>
@@ -664,9 +676,9 @@ export default {
 
     if (url.pathname === "/slow") {
       try {
-        const slow = await buildSlow(env);
+        const { slow } = await buildSlow(env);
         return Response.json(
-          { dry_run: true, counts: slow.counts, errors: slow.errors, generated: slow.generated },
+          { dry_run: true, counts: slow.counts, stale: slow.stale, errors: slow.errors, generated: slow.generated },
           { headers: { "cache-control": "no-store" } }
         );
       } catch (e) {
@@ -688,12 +700,14 @@ export default {
     // being asked and keeps the response readable.
     if (url.pathname === "/state") {
       try {
-        const state = await readSeriesState(env.BUCKET);
+        const [series, hs] = await Promise.all([readSeriesState(env.BUCKET), readHemiState(env.BUCKET)]);
+        const state = { ...series, hemi: hs.hemi, hemi_latest: hs.hemi_latest };
         const live = assembleLive(state);
         return Response.json(
           {
             dry_run: true,
-            cold: state.cold,
+            cold: series.cold,
+            hemi_cold: hs.cold,
             next_repair: repairTarget(),
             would_publish: publishable(live) === null,
             reject_reason: publishable(live),
@@ -722,7 +736,7 @@ export default {
           fresh_rows: sw.mag.length,
           latest_mag: sw.latestMag,
           latest_wind: sw.latestWind,
-          stored: { mag: state.mag.length, wind: state.wind.length, hemi: state.hemi.length },
+          stored: { mag: state.mag.length, wind: state.wind.length },
         },
         { headers: { "cache-control": "no-store" } }
       );

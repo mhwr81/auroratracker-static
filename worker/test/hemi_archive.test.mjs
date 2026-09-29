@@ -9,7 +9,8 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mergeArchive, buildHemiArchive, SCHEMA } from "../src/hemi_archive.js";
+import { mergeArchive, buildHemiArchive, publishHemiArchive, ARCHIVE_KEY, SCHEMA } from "../src/hemi_archive.js";
+import { publishSlow, slowBody } from "../src/slow.js";
 
 const NOW = Date.parse("2026-09-28T19:00:00Z");
 const row = (time, n = 10, s = 10, extra = {}) => ({ time, obs_time: time, north: n, south: s, ...extra });
@@ -79,8 +80,69 @@ test("a cold or unreadable capture window keeps the previous archive (null)", as
 });
 
 test("reads the capture window from R2 state", async () => {
-  const state = { mag: [], wind: [], hemi: [row("2026-09-28T18:00:00Z", 42)] };
-  const bucket = { get: async () => ({ json: async () => state }) };
+  const state = { hemi: [row("2026-09-28T18:00:00Z", 42)] };
+  const bucket = { get: async () => ({ text: async () => JSON.stringify(state) }) };
   const out = await buildHemiArchive(bucket, null, NOW);
   assert.equal(out.days["2026-09-28"].readings[0].north, 42);
+});
+
+// A minimal R2 stand-in: string bodies, customMetadata kept, puts recorded.
+function memBucket(init = {}, { failGet = null } = {}) {
+  const objs = new Map(Object.entries(init).map(([k, v]) => [k, { body: JSON.stringify(v), meta: {} }]));
+  const puts = [];
+  return {
+    objs, puts,
+    async get(k) {
+      if (failGet?.(k)) throw new Error("R2 down");
+      const o = objs.get(k);
+      return o ? { text: async () => o.body, json: async () => JSON.parse(o.body), customMetadata: o.meta } : null;
+    },
+    async put(k, body, opts = {}) {
+      puts.push(k);
+      objs.set(k, { body, meta: opts.customMetadata ?? {} });
+    },
+  };
+}
+
+test("the archive job migrates the archive out of slow.json on its first run", async () => {
+  const prev = archive({ "2026-09-27": [row("2026-09-27T12:00:00Z", 7)] });
+  const bucket = memBucket({
+    "v1/slow.json": { hemi_history: prev },
+    "internal/hemi.json": { hemi: [row("2026-09-28T18:00:00Z", 42)] },
+  });
+  const r = await publishHemiArchive(bucket, NOW);
+  assert.equal(r.written, true);
+  const out = JSON.parse(bucket.objs.get(ARCHIVE_KEY).body);
+  assert.deepEqual(Object.keys(out.days), ["2026-09-27", "2026-09-28"]);
+  assert.equal(bucket.objs.get(ARCHIVE_KEY).meta.days, "2");
+});
+
+test("the archive job skips, rather than rebuilds, when the archive is unreadable", async () => {
+  const bucket = memBucket(
+    { "internal/hemi.json": { hemi: [row("2026-09-28T18:00:00Z")] } },
+    { failGet: (k) => k === ARCHIVE_KEY }
+  );
+  assert.equal((await publishHemiArchive(bucket, NOW)).written, false);
+  assert.deepEqual(bucket.puts, []);
+});
+
+test("slow.json carries the archive verbatim, spliced in as hemi_history", () => {
+  const a = archive({ "2026-09-28": [row("2026-09-28T01:00:00Z")] });
+  const slow = { schema: "v1", donki: { notifications: [] }, counts: { hemi_days: 1 } };
+  assert.deepEqual(JSON.parse(slowBody(slow, JSON.stringify(a))), { ...slow, hemi_history: a });
+  assert.equal(JSON.parse(slowBody(slow, null)).hemi_history, null);
+});
+
+test("the slow tier carries the old hemi_history forward when no archive can be built yet", async () => {
+  const a = archive({ "2026-09-27": [row("2026-09-27T12:00:00Z")] });
+  const bucket = memBucket({ "v1/slow.json": { donki: { notifications: [1] }, hemi_history: a } });
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response("[]", { status: 200 });
+  try {
+    await publishSlow({ BUCKET: bucket, NASA_API_KEY: "k" });
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+  assert.deepEqual(JSON.parse(bucket.objs.get("v1/slow.json").body).hemi_history, a);
+  assert.deepEqual(JSON.parse(bucket.objs.get("internal/donki.json").body).notifications, []);
 });

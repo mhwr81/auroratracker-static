@@ -8,17 +8,18 @@
  * makes that a fixed 48 requests a day regardless of userbase, and lets the
  * key come out of the binary entirely.
  *
- * The hemispheric power history is built here as well (hemi_archive.js),
- * from the fast tier's own 2-minute captures. It used to be fetched from a
- * file a GitHub Action committed, which lagged by hours and dropped the
- * first hour of most days.
+ * slow.json also carries the hemispheric power archive as hemi_history,
+ * because that is where the app reads it. The archive is built by its own
+ * cron (hemi_archive.js) and spliced in here as raw text: parsing ~100 KB of
+ * it only to serialise it straight back out is what pushed this tier past
+ * 10 ms when the archive was first built here.
  *
  * The DONKI feeds are republished VERBATIM. These payloads are small enough that
  * re-parsing them would buy nothing and risk the server and the app
  * disagreeing about shape -- the failure mode that is hardest to notice.
  */
 
-import { buildHemiArchive } from "./hemi_archive.js";
+import { ARCHIVE_KEY, publishHemiArchive } from "./hemi_archive.js";
 
 const DONKI = "https://api.nasa.gov/DONKI";
 
@@ -74,30 +75,57 @@ async function getJson(url, label) {
 }
 
 /**
- * Last published bundle, so a section that fails this run can keep serving
- * the copy that worked. Returns an empty object when there is nothing yet
- * (or it will not parse), and null when R2 itself could not be read.
+ * The DONKI sections as last fetched, kept apart from slow.json.
  *
- * The distinction matters because the hemi archive is carried forward from
- * here: rebuilding it after a transient read failure would silently cut three
- * days of history down to the 30-hour capture window.
+ * Two readers need them without the hemi archive slow.json also carries: this
+ * tier, so a section that fails this run can keep serving the copy that
+ * worked, and the alerts tier, which checks the CME bulletins every 4
+ * minutes. Both used to parse all ~120 KB of slow.json to get at ~25 KB.
  */
-async function previousSlow(bucket) {
-  let obj;
+export const DONKI_KEY = "internal/donki.json";
+
+/**
+ * The last DONKI sections, or null when there are none. Falls back to
+ * slow.json's copy once, for the first run after this object was introduced.
+ * A read failure returns null too: nothing here is destructive, the worst
+ * case is one run without a fallback.
+ */
+export async function readDonki(bucket) {
   try {
-    obj = await bucket.get(SLOW_KEY);
+    const obj = await bucket.get(DONKI_KEY);
+    if (obj) return (await obj.json()) ?? null;
+    const slow = await bucket.get(SLOW_KEY);
+    return slow ? ((await slow.json())?.donki ?? null) : null;
   } catch (e) {
-    console.log(`previous ${SLOW_KEY} read failed: ${e.message}`);
+    console.log(`previous DONKI read failed: ${e.message}`);
     return null;
-  }
-  if (!obj) return {};
-  try {
-    return (await obj.json()) ?? {};
-  } catch {
-    return {};
   }
 }
 
+/** A hemi archive older than this is flagged stale; it is rebuilt every ~30 min. */
+const ARCHIVE_STALE_MS = 90 * 60_000;
+
+/**
+ * The hemi archive's stored JSON, unparsed, with the day count and age its
+ * writer left in customMetadata. `text` is null when there is no archive yet.
+ * Throws when R2 could not be read -- publishing without the archive would
+ * drop it from slow.json, which is worse than skipping one slow run.
+ */
+async function readArchiveText(bucket) {
+  const obj = await bucket.get(ARCHIVE_KEY);
+  if (!obj) return { text: null, days: null, updatedAt: null };
+  const days = Number(obj.customMetadata?.days);
+  return {
+    text: await obj.text(),
+    days: Number.isFinite(days) ? days : null,
+    updatedAt: obj.customMetadata?.updated_at ?? null,
+  };
+}
+
+/**
+ * Build the slow bundle. Returns it WITHOUT hemi_history, plus the archive's
+ * raw text for publishSlow to splice in -- see the header note.
+ */
 export async function buildSlow(env) {
   // Trimmed: a secret set by piping through a shell picks up a trailing
   // newline, and NASA answers a malformed key with a 403 that says nothing
@@ -118,51 +146,60 @@ export async function buildSlow(env) {
       return null;
     });
 
-  const [notifications, flr, enlil, prev] = await Promise.all([
+  const [notifications, flr, enlil, prev, arch] = await Promise.all([
     attempt(getJsonRetry(`${DONKI}/notifications?api_key=${key}&type=all&startDate=${since(2)}&endDate=${ymd(now)}`, "DONKI notifications")),
     attempt(getJsonRetry(`${DONKI}/FLR?api_key=${key}&startDate=${since(7)}&endDate=${ymd(now)}`, "DONKI FLR")),
     attempt(getJsonRetry(`${DONKI}/WSAEnlilSimulations?api_key=${key}&startDate=${since(14)}&endDate=${ymd(now)}`, "DONKI ENLIL")),
-    env.BUCKET ? previousSlow(env.BUCKET) : {},
+    env.BUCKET ? readDonki(env.BUCKET) : null,
+    env.BUCKET ? readArchiveText(env.BUCKET) : { text: null, days: null, updatedAt: null },
   ]);
-  if (prev === null) throw new Error(`${SLOW_KEY} unreadable; skipping this run to protect the hemi archive`);
-  const hemiHistory = env.BUCKET ? await buildHemiArchive(env.BUCKET, prev.hemi_history ?? null) : null;
 
   // A failed section keeps whatever was published last rather than becoming
   // null. DONKI drops out for minutes at a time; without this the app would
   // see an empty CME panel and fall back to querying NASA per device --
   // hammering the very endpoint that is already struggling.
-  const keep = (fresh, path, fallbackAge) => {
+  const keep = (fresh, name) => {
     if (fresh !== null && fresh !== undefined) return { value: fresh, stale: false };
-    const old = path.split(".").reduce((o, k) => (o ?? {})[k], prev);
+    const old = prev?.[name];
     return old !== undefined && old !== null
       ? { value: old, stale: true }
       : { value: null, stale: false };
   };
 
-  const n = keep(notifications, "donki.notifications");
-  const f = keep(flr, "donki.flr");
-  const e = keep(enlil, "donki.enlil");
-  const h = keep(hemiHistory, "hemi_history");
+  const n = keep(notifications, "notifications");
+  const f = keep(flr, "flr");
+  const e = keep(enlil, "enlil");
+  const archiveAge = arch.updatedAt ? now.getTime() - Date.parse(arch.updatedAt) : NaN;
 
-  return {
+  const slow = {
     schema: "v1",
     generated: now.toISOString().replace(/\.\d{3}Z$/, "Z"),
     // Which sections are being served from a previous run.
     stale: Object.entries({
-      notifications: n.stale, flr: f.stale, enlil: e.stale, hemi_history: h.stale,
+      notifications: n.stale, flr: f.stale, enlil: e.stale,
+      hemi_history: archiveAge > ARCHIVE_STALE_MS,
     }).filter(([, v]) => v).map(([k]) => k),
     // A null section means that fetch failed this run. Callers must treat it
     // as "go and get it yourself", never as "there is no data".
     donki: { notifications: n.value, flr: f.value, enlil: e.value },
-    hemi_history: h.value,
     counts: {
       notifications: Array.isArray(n.value) ? n.value.length : null,
       flr: Array.isArray(f.value) ? f.value.length : null,
       enlil: Array.isArray(e.value) ? e.value.length : null,
-      hemi_days: h.value?.days ? Object.keys(h.value.days).length : null,
+      hemi_days: arch.text ? arch.days : null,
     },
     errors,
   };
+  return { slow, hemiText: arch.text };
+}
+
+/**
+ * slow.json's text: the bundle with the archive's stored JSON appended as
+ * hemi_history, verbatim. The archive was written by JSON.stringify, so it is
+ * already valid JSON and splicing it cannot produce a malformed document.
+ */
+export function slowBody(slow, hemiText) {
+  return `${JSON.stringify(slow).slice(0, -1)},"hemi_history":${hemiText ?? "null"}}`;
 }
 
 /**
@@ -171,17 +208,41 @@ export async function buildSlow(env) {
  * hitting upstream directly -- the exact load this tier exists to prevent.
  */
 export async function publishSlow(env) {
-  const slow = await buildSlow(env);
+  const built = await buildSlow(env);
+  const { slow } = built;
+  let { hemiText } = built;
+
+  // One-time migration: until the hemi archive cron has run once, the
+  // archive exists only inside slow.json. Build it now, and failing that
+  // carry the old copy forward, rather than publish a slow.json without it.
+  if (hemiText === null) {
+    console.log(`${ARCHIVE_KEY} missing; building it before the slow bundle`);
+    const a = await publishHemiArchive(env.BUCKET);
+    if (a.written) {
+      hemiText = a.body;
+      slow.counts.hemi_days = a.days;
+    } else {
+      const old = await env.BUCKET.get(SLOW_KEY);
+      const h = old ? (await old.json())?.hemi_history : null;
+      if (h) hemiText = JSON.stringify(h);
+    }
+  }
+
   const live = Object.values(slow.counts).some((v) => v !== null);
   if (!live) {
     console.log(`REFUSED to write ${SLOW_KEY}: every section failed`);
     return { written: false, slow };
   }
 
-  const body = JSON.stringify(slow);
-  await env.BUCKET.put(SLOW_KEY, body, {
-    httpMetadata: { contentType: "application/json", cacheControl: SLOW_CACHE_CONTROL },
-  });
+  const body = slowBody(slow, hemiText);
+  await Promise.all([
+    env.BUCKET.put(SLOW_KEY, body, {
+      httpMetadata: { contentType: "application/json", cacheControl: SLOW_CACHE_CONTROL },
+    }),
+    env.BUCKET.put(DONKI_KEY, JSON.stringify(slow.donki), {
+      httpMetadata: { contentType: "application/json", cacheControl: "no-store" },
+    }),
+  ]);
   console.log(`wrote ${SLOW_KEY} ${body.length}B — ${JSON.stringify(slow.counts)}`);
   return { written: true, bytes: body.length, slow };
 }

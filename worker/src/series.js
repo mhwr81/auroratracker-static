@@ -296,7 +296,7 @@ function num(v) {
 
 // ── state io ───────────────────────────────────────────────────────────────
 
-const EMPTY = { mag: [], wind: [], hemi: [], latest: {}, hemi_latest: null, source: null };
+const EMPTY = { mag: [], wind: [], latest: {}, source: null };
 
 export async function readSeriesState(bucket) {
   try {
@@ -306,9 +306,7 @@ export async function readSeriesState(bucket) {
     return {
       mag: Array.isArray(s.mag) ? s.mag : [],
       wind: Array.isArray(s.wind) ? s.wind : [],
-      hemi: Array.isArray(s.hemi) ? s.hemi : [],
       latest: s.latest ?? {},
-      hemi_latest: s.hemi_latest ?? null,
       source: s.source ?? null,
       cold: false,
     };
@@ -318,9 +316,51 @@ export async function readSeriesState(bucket) {
   }
 }
 
+/** Only the solar wind half -- the hemi window lives in HEMI_KEY. */
 export async function writeSeriesState(bucket, state) {
-  const { cold, ...persist } = state;
-  await bucket.put(STATE_KEY, JSON.stringify(persist), {
+  const { mag, wind, latest, source } = state;
+  await bucket.put(STATE_KEY, JSON.stringify({ mag, wind, latest, source }), {
     httpMetadata: { contentType: "application/json", cacheControl: "no-store" },
   });
+}
+
+/**
+ * The hemispheric power window, in its own object rather than inside
+ * internal/series.json.
+ *
+ * Split out because the hemi archive tier needs only this, and on a 10 ms
+ * budget it cannot afford to parse ~100 KB of mag and wind series to get at
+ * ~40 KB of hemi rows. `text` is the stored JSON, kept so the fast tier can
+ * skip the write when NOAA has published nothing new -- the file moves every
+ * 5 minutes and the tier runs every 2.
+ */
+export const HEMI_KEY = "internal/hemi.json";
+
+export async function readHemiState(bucket) {
+  try {
+    const obj = await bucket.get(HEMI_KEY);
+    if (!obj) return { hemi: [], hemi_latest: null, text: null, cold: true };
+    const text = await obj.text();
+    const s = JSON.parse(text) ?? {};
+    return {
+      hemi: Array.isArray(s.hemi) ? s.hemi : [],
+      hemi_latest: s.hemi_latest ?? null,
+      text,
+      cold: false,
+    };
+  } catch (e) {
+    console.log(`hemi state read failed: ${e.message}`);
+    return { hemi: [], hemi_latest: null, text: null, cold: true };
+  }
+}
+
+/** Writes only when the content changed; returns whether it did. */
+export async function writeHemiState(bucket, hemiState) {
+  const text = JSON.stringify({ hemi: hemiState.hemi, hemi_latest: hemiState.hemi_latest });
+  if (text === hemiState.text) return false;
+  await bucket.put(HEMI_KEY, text, {
+    httpMetadata: { contentType: "application/json", cacheControl: "no-store" },
+  });
+  hemiState.text = text;
+  return true;
 }
