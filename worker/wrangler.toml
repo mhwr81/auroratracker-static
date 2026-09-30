@@ -20,8 +20,7 @@ bucket_name = "aurora-data"
 # index.js for the parity arithmetic that guarantees it.
 #
 #   */2      fast tier: 6.5 KB propagated solar wind + 11.6 KB hemi power,
-#            into the 2-hour tail; publishes v2/now.json (and v1/live.json
-#            while LEGACY_LIVE is "tick").
+#            into the 2-hour tail; publishes v2/now.json.
 #            Matches AuroraProvider's 120-second refresh timer. Publishing
 #            faster than the app reads would only rewrite R2 for nobody; the
 #            pair moved from 3 minutes to 2 to cut the sawtooth in the
@@ -36,7 +35,8 @@ bucket_name = "aurora-data"
 #   3,35     slow tier: DONKI. Hours-scale data, and DONKI should be touched
 #            as little as the app tolerates.
 #   15,47    repair tier: folds the fast tier's tail into the full series and
-#            publishes v2/series.json. Rebuilds both series from the 7-day
+#            publishes v2/series.json, plus v1/live.json for app builds from
+#            before the split. Rebuilds both series from the 7-day
 #            propagated feed first after a gap or every 12 h, and reads RTSW
 #            mag once a day for the spacecraft id. See tickRepair in index.js.
 #   27,59    hemi archive: folds the fast tier's 30-hour hemi window into the
@@ -48,15 +48,6 @@ bucket_name = "aurora-data"
 # share one of these.
 [triggers]
 crons = ["*/2 * * * *", "1-59/4 * * * *", "3,35 * * * *", "15,47 * * * *", "27,59 * * * *"]
-
-[vars]
-# How v1/live.json is kept for app builds that predate v2/now.json +
-# v2/series.json (see legacyMode in index.js):
-#   "tick"  every fast tick, as before. Costs the fast tier what it did before
-#           the split. Keep until the v2 app has rolled out.
-#   "fold"  twice an hour. Old installs' readings go up to ~30 min stale.
-#   "off"   not written; the fast tier then moves ~20 KB instead of ~250 KB.
-LEGACY_LIVE = "tick"
 
 [observability]
 enabled = true

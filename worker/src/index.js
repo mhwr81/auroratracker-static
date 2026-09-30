@@ -434,20 +434,11 @@ const V2_SERIES_KEY = "v2/series.json";
 const V2_SERIES_CACHE_CONTROL = "public, max-age=300, stale-while-revalidate=300";
 
 /**
- * How v1/live.json is kept for installs that predate v2 -- LEGACY_LIVE in
- * wrangler.toml:
- *
- *   tick  every fast tick, exactly as before. The default, and what to run
- *         until the v2 app has rolled out: it costs the fast tier what it
- *         cost before the split, because it has to read the full series.
- *   fold  twice an hour from the repair slot. Old installs' readings can then
- *         be ~30 minutes old, so switch only once few of them are left.
- *   off   not written.
+ * v1/live.json, for app builds that predate v2, is written by the fold --
+ * twice an hour, not every tick. Writing it every tick would need the full
+ * series every tick, which is the cost the split removes. Old builds keep
+ * working, with readings up to ~30 minutes old, until they update.
  */
-function legacyMode(env) {
-  const m = (env.LEGACY_LIVE || "").trim();
-  return m === "fold" || m === "off" ? m : "tick";
-}
 
 /** JSON.stringify(doc), with doc[key] -- an object of arrays -- built from `json`. */
 function docBody(doc, key, json = {}) {
@@ -544,13 +535,8 @@ async function seedTail(env, state, hs, nowMs) {
  */
 async function tickFast(env) {
   const started = Date.now();
-  const legacy = legacyMode(env) === "tick";
-  let [tail, state, hs] = await Promise.all([
-    readTail(env.BUCKET),
-    legacy ? readSeriesState(env.BUCKET) : null,
-    legacy ? readHemiState(env.BUCKET) : null,
-  ]);
-  if (tail.cold) tail = await seedTail(env, state, hs, Date.now());
+  let tail = await readTail(env.BUCKET);
+  if (tail.cold) tail = await seedTail(env, null, null, Date.now());
 
   const [sw, hemi] = await Promise.all([
     fetchPropagated(tail.source).catch((e) => {
@@ -604,7 +590,6 @@ async function tickFast(env) {
   const [, out] = await Promise.all([
     writeTail(env.BUCKET, tail, json),
     publishNow(env, tail, json, label),
-    legacy ? publishLive(env, overlay(state, hs, tail, now), label) : null,
   ]);
   return { ...out, tail };
 }
@@ -691,7 +676,7 @@ async function tickRepair(env) {
     env.BUCKET.put(V2_SERIES_KEY, body, {
       httpMetadata: { contentType: "application/json", cacheControl: V2_SERIES_CACHE_CONTROL },
     }),
-    legacyMode(env) === "fold" ? publishLive(env, view, label, json) : null,
+    publishLive(env, view, label, json),
   ]);
   console.log(`[${label}] wrote ${V2_SERIES_KEY} ${body.length}B — mag=${view.mag.length} wind=${view.wind.length} hemi=${view.hemi.length}`);
   return { repaired: action !== null, action, view };
@@ -925,7 +910,6 @@ export default {
             cold: series.cold,
             hemi_cold: hs.cold,
             tail_cold: tail.cold,
-            legacy_live: legacyMode(env),
             next_repair: repairDue(series.cold ? null : series) ?? "fold only",
             repair: { repaired_at: series.repaired_at, source_at: series.source_at, gap_at: series.gap_at, tail_gap_at: tail.gap_at },
             tail_counts: { mag: tail.mag.length, wind: tail.wind.length, hemi: tail.hemi.length },
