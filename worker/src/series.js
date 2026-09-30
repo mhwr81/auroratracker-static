@@ -126,18 +126,90 @@ export function applyDensity(rows, nowMs) {
   const out = [];
   let lastCoarse = 0;
 
-  for (const r of rows) {
-    const t = tagMs(r?.time_tag);
-    if (Number.isNaN(t)) continue;
-    if (nowMs - t > SERIES_WINDOW_MS) continue;
+  // The window and dense-zone tests are string comparisons against cutoff
+  // tags, so only the ~100 coarse rows pay for a Date.parse -- the fast tier
+  // runs this over both series every 2 minutes. Tags are whole seconds, so
+  // "t < cutoff" is exactly "tag < the cutoff rounded up to a second".
+  const windowTag = cutoffTag(nowMs - SERIES_WINDOW_MS);
+  const denseTag = cutoffTag(nowMs - DENSE_MS);
 
-    if (nowMs - t > DENSE_MS) {
-      if (t - lastCoarse < COARSE_MS) continue;
+  for (const r of rows) {
+    const tag = r?.time_tag;
+    if (!isBareTag(tag)) {
+      // Anything not in the bare RTSW spelling takes the general path.
+      const t = tagMs(tag);
+      if (Number.isNaN(t)) continue;
+      if (nowMs - t > SERIES_WINDOW_MS) continue;
+      if (nowMs - t > DENSE_MS) {
+        if (t - lastCoarse < COARSE_MS) continue;
+        lastCoarse = t;
+      }
+      out.push(r);
+      continue;
+    }
+    if (tag < windowTag) continue;
+    if (tag < denseTag) {
+      const t = Date.parse(tag + "Z");
+      if (Number.isNaN(t) || t - lastCoarse < COARSE_MS) continue;
       lastCoarse = t;
     }
     out.push(r);
   }
   return out;
+}
+
+/** `2026-09-14T01:59:00`: fixed width, whole seconds, no zone. */
+function isBareTag(tag) {
+  return typeof tag === "string" && tag.length === 19 && tag[10] === "T" && tag[4] === "-";
+}
+
+function cutoffTag(ms) {
+  return new Date(Math.ceil(ms / 1000) * 1000).toISOString().slice(0, 19);
+}
+
+/**
+ * mergeSeries for the fast tier's case: `prev` is stored state -- already
+ * bare-tagged, sorted, deduplicated and thinned, because it is always the
+ * output of this, mergeSeries or rebuildSeries -- and `fresh` is the last hour.
+ *
+ * Only the overlapping tail is merged. mergeSeries copies every stored row
+ * into a Map and re-sorts the lot to fold in 60 rows, twice a tick; on the
+ * free plan's 10 ms budget that was a measurable share of the fast tier.
+ * The result is the same as mergeSeries(prev, fresh) (see the test).
+ */
+export function appendSeries(prev, fresh, nowMs) {
+  if (!Array.isArray(prev) || prev.length === 0) return mergeSeries(prev, fresh, nowMs);
+  const f = [];
+  for (const r of Array.isArray(fresh) ? fresh : []) {
+    const tag = bareTag(r?.time_tag);
+    if (tag !== null) f.push(r.time_tag === tag ? r : { ...r, time_tag: tag });
+  }
+  if (f.length === 0) return applyDensity(prev, nowMs);
+  f.sort((a, b) => (a.time_tag < b.time_tag ? -1 : a.time_tag > b.time_tag ? 1 : 0));
+
+  const first = f[0].time_tag;
+  let i = prev.length;
+  while (i > 0 && prev[i - 1].time_tag >= first) i--;
+
+  const byTime = new Map();
+  for (let k = i; k < prev.length; k++) byTime.set(prev[k].time_tag, prev[k]);
+  for (const r of f) byTime.set(r.time_tag, r);
+  const tail = [...byTime.values()].sort((a, b) =>
+    a.time_tag < b.time_tag ? -1 : a.time_tag > b.time_tag ? 1 : 0
+  );
+  return applyDensity(i === 0 ? tail : prev.slice(0, i).concat(tail), nowMs);
+}
+
+/**
+ * True when fresh rows start more than a minute after the stored series ends:
+ * the fast tier was down for longer than the propagated feed's one-hour
+ * memory, and only a repair can fill what is missing.
+ */
+export function leavesGap(prev, fresh) {
+  const last = Array.isArray(prev) && prev.length ? prev[prev.length - 1].time_tag : null;
+  const first = Array.isArray(fresh) && fresh.length ? bareTag(fresh[0].time_tag) : null;
+  if (last === null || first === null) return false;
+  return tagMs(first) - tagMs(last) > 60_000;
 }
 
 /**
@@ -227,9 +299,68 @@ export async function fetchPropagated(source = null) {
   if (!Array.isArray(table) || table.length < 2) {
     throw new Error("propagated feed carried no rows");
   }
+  return propagatedRows(table[0], table.slice(1), source);
+}
 
+// ── the repair feed ────────────────────────────────────────────────────────
+
+/**
+ * Seven days of the same propagated table, both feeds in one 1.1 MB file.
+ *
+ * The repair tier rebuilds from this rather than from RTSW. Checked on
+ * 2026-09-29 against RTSW's active spacecraft on every overlapping minute:
+ * mag 1,400/1,400 and wind 1,387/1,387 identical in every field the app
+ * reads. One read rebuilds both series where RTSW needed a 1.6 MB and a
+ * 2.9 MB file on separate invocations, and only the last day of it is
+ * parsed -- see sliceFrom.
+ */
+const PROPAGATED_FULL_URL =
+  "https://services.swpc.noaa.gov/products/geospace/propagated-solar-wind.json";
+
+/**
+ * The rows of a propagated table from `cutoffMs` on, parsing only that part.
+ *
+ * Rows are chronological and each starts `["<ISO time>`, so the first row of
+ * the cutoff's hour can be found with indexOf and everything before it
+ * skipped -- about six days of the seven. The slice starts a little before
+ * the cutoff and the caller's density pass trims the rest. When no row of
+ * the next few hours is found (a gap in the feed, or a changed shape) this
+ * parses the whole table instead, so the result never depends on the slice.
+ */
+export function sliceFrom(text, cutoffMs) {
+  const headerEnd = text.indexOf("]");
+  const header = JSON.parse(text.slice(text.indexOf("[", 1), headerEnd + 1));
+  let pos = -1;
+  for (let h = 0; h < 3 && pos < 0; h++) {
+    const hour = new Date(cutoffMs + h * 3600_000).toISOString().slice(0, 13);
+    pos = text.indexOf(`["${hour}`, headerEnd);
+  }
+  if (pos < 0) {
+    const table = JSON.parse(text);
+    return { header: table[0], rows: table.slice(1) };
+  }
+  return { header, rows: JSON.parse("[" + text.slice(pos)) };
+}
+
+/** The last SERIES_WINDOW_MS of both feeds, for the repair tier. */
+export async function fetchPropagatedDay(nowMs, source = null) {
+  const res = await fetch(PROPAGATED_FULL_URL, {
+    headers: { ...UA },
+    signal: AbortSignal.timeout(TIMEOUT_MS),
+    cf: { cacheTtl: 0, cacheEverything: false },
+  });
+  if (!res.ok) throw new Error(`propagated (7 day) -> HTTP ${res.status}`);
+  const { header, rows } = sliceFrom(await res.text(), nowMs - SERIES_WINDOW_MS);
+  return propagatedRows(header, rows, source);
+}
+
+/**
+ * Mag-shaped and wind-shaped rows from a propagated table, oldest first.
+ * `rows` excludes the header row.
+ */
+export function propagatedRows(headerRow, rows, source = null) {
   // By name, not by position — see the header note on the GSM frame.
-  const header = table[0].map((h) => String(h).trim());
+  const header = headerRow.map((h) => String(h).trim());
   const col = (name) => {
     const i = header.indexOf(name);
     if (i < 0) throw new Error(`propagated feed missing column ${name}`);
@@ -249,8 +380,8 @@ export async function fetchPropagated(source = null) {
   let latestMag = null;
   let latestWind = null;
 
-  for (let i = 1; i < table.length; i++) {
-    const r = table[i];
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i];
     if (!Array.isArray(r)) continue;
     const tag = bareTag(r[iTime]);
     if (tag === null) continue;
@@ -296,7 +427,19 @@ function num(v) {
 
 // ── state io ───────────────────────────────────────────────────────────────
 
-const EMPTY = { mag: [], wind: [], latest: {}, source: null };
+/**
+ * Besides the series, state carries the repair tier's bookkeeping:
+ *
+ *   repaired_at  last rebuild of both series from the 7-day propagated feed
+ *   source_at    last RTSW read, the only feed that names the spacecraft
+ *   gap_at       set by the fast tier when it could not bridge to the stored
+ *                series; cleared by the next rebuild
+ *
+ * These are mirrored into the object's customMetadata so the repair tier can
+ * decide whether it has anything to do from a HEAD, without downloading and
+ * parsing the ~100 KB body on the 47 runs a day it has nothing to do.
+ */
+const EMPTY = { mag: [], wind: [], latest: {}, source: null, repaired_at: null, source_at: null, gap_at: null };
 
 export async function readSeriesState(bucket) {
   try {
@@ -308,6 +451,9 @@ export async function readSeriesState(bucket) {
       wind: Array.isArray(s.wind) ? s.wind : [],
       latest: s.latest ?? {},
       source: s.source ?? null,
+      repaired_at: s.repaired_at ?? null,
+      source_at: s.source_at ?? null,
+      gap_at: s.gap_at ?? null,
       cold: false,
     };
   } catch (e) {
@@ -316,11 +462,29 @@ export async function readSeriesState(bucket) {
   }
 }
 
-/** Only the solar wind half -- the hemi window lives in HEMI_KEY. */
-export async function writeSeriesState(bucket, state) {
-  const { mag, wind, latest, source } = state;
-  await bucket.put(STATE_KEY, JSON.stringify({ mag, wind, latest, source }), {
+/** The bookkeeping alone, from a HEAD. Null when there is no state yet. */
+export async function readSeriesMeta(bucket) {
+  const obj = await bucket.head(STATE_KEY);
+  if (!obj) return null;
+  const m = obj.customMetadata ?? {};
+  return { repaired_at: m.repaired_at || null, source_at: m.source_at || null, gap_at: m.gap_at || null };
+}
+
+/**
+ * Only the solar wind half -- the hemi window lives in HEMI_KEY.
+ *
+ * `json` optionally carries the series already serialised, so the fast tier
+ * can stringify each array once and reuse it for live.json (see liveBody).
+ */
+export async function writeSeriesState(bucket, state, json = {}) {
+  const meta = { repaired_at: state.repaired_at ?? null, source_at: state.source_at ?? null, gap_at: state.gap_at ?? null };
+  const body =
+    `{"mag":${json.mag ?? JSON.stringify(state.mag)},"wind":${json.wind ?? JSON.stringify(state.wind)},` +
+    `"latest":${JSON.stringify(state.latest ?? {})},"source":${JSON.stringify(state.source ?? null)},` +
+    `${JSON.stringify(meta).slice(1)}`;
+  await bucket.put(STATE_KEY, body, {
     httpMetadata: { contentType: "application/json", cacheControl: "no-store" },
+    customMetadata: Object.fromEntries(Object.entries(meta).map(([k, v]) => [k, v ?? ""])),
   });
 }
 
@@ -355,8 +519,10 @@ export async function readHemiState(bucket) {
 }
 
 /** Writes only when the content changed; returns whether it did. */
-export async function writeHemiState(bucket, hemiState) {
-  const text = JSON.stringify({ hemi: hemiState.hemi, hemi_latest: hemiState.hemi_latest });
+export async function writeHemiState(bucket, hemiState, hemiJson = null) {
+  const text =
+    `{"hemi":${hemiJson ?? JSON.stringify(hemiState.hemi)},` +
+    `"hemi_latest":${JSON.stringify(hemiState.hemi_latest ?? null)}}`;
   if (text === hemiState.text) return false;
   await bucket.put(HEMI_KEY, text, {
     httpMetadata: { contentType: "application/json", cacheControl: "no-store" },

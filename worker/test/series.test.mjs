@@ -23,8 +23,15 @@ import {
   projectRow,
   rebuildSeries,
   fetchPropagated,
+  appendSeries,
+  leavesGap,
+  sliceFrom,
+  propagatedRows,
+  writeSeriesState,
+  readSeriesState,
+  readSeriesMeta,
 } from "../src/series.js";
-import { repairTarget, assembleLive, publishable } from "../src/index.js";
+import { repairDue, assembleLive, publishable, liveBody } from "../src/index.js";
 
 const NOW = Date.parse("2026-09-16T12:00:00Z");
 
@@ -215,9 +222,137 @@ test("a missing column is an error, not a silent null series", async () => {
 
 // ── scheduling + publish gate ──────────────────────────────────────────────
 
-test("the repair tier alternates feeds across the hour", () => {
-  assert.equal(repairTarget(new Date(Date.UTC(2026, 8, 16, 12, 5))), "mag");
-  assert.equal(repairTarget(new Date(Date.UTC(2026, 8, 16, 12, 35))), "wind");
+test("the repair tier rebuilds on a gap or after 12 h, and reads RTSW daily", () => {
+  const iso = (hAgo) => new Date(NOW - hAgo * 3600_000).toISOString();
+  assert.equal(repairDue(null, NOW), "rebuild"); // no state at all
+  assert.equal(repairDue({ repaired_at: null, source_at: null, gap_at: null }, NOW), "rebuild");
+  assert.equal(repairDue({ repaired_at: iso(1), source_at: iso(1), gap_at: iso(0.1) }, NOW), "rebuild");
+  assert.equal(repairDue({ repaired_at: iso(13), source_at: iso(1), gap_at: null }, NOW), "rebuild");
+  assert.equal(repairDue({ repaired_at: iso(1), source_at: iso(25), gap_at: null }, NOW), "rtsw");
+  assert.equal(repairDue({ repaired_at: iso(1), source_at: iso(1), gap_at: null }, NOW), null);
+  assert.equal(repairDue({ repaired_at: "garbage", source_at: iso(1), gap_at: null }, NOW), "rebuild");
+});
+
+// ── the fast tier's shortcuts must not change the answer ───────────────────
+
+/** applyDensity as it was before the string-compare shortcut. */
+function applyDensityReference(rows, nowMs) {
+  const out = [];
+  let lastCoarse = 0;
+  for (const r of rows) {
+    const t = Date.parse(toIsoZ(r?.time_tag));
+    if (Number.isNaN(t)) continue;
+    if (nowMs - t > SERIES_WINDOW_MS) continue;
+    if (nowMs - t > 6 * 3600_000) {
+      if (t - lastCoarse < 10 * 60_000) continue;
+      lastCoarse = t;
+    }
+    out.push(r);
+  }
+  return out;
+}
+
+test("density's string shortcut matches the Date.parse version, boundaries included", () => {
+  const rows = [];
+  for (let n = 26 * 60; n >= 0; n--) rows.push(magRow(n));
+  rows.push({ time_tag: "not a time" }, { time_tag: ago(5) + "Z" });
+  // Whole-minute, whole-second and fractional "now", so the cutoffs land on,
+  // just after and between rows.
+  for (const now of [NOW, NOW + 1, NOW + 999, NOW + 1000, NOW + 30_500, NOW - 1]) {
+    assert.deepEqual(applyDensity(rows, now), applyDensityReference(rows, now), `now=${now}`);
+  }
+});
+
+test("appendSeries gives the same series as mergeSeries, tick after tick", () => {
+  // A day of history, then 3 hours of 2-minute ticks each carrying the last
+  // hour -- including restated values -- exactly as the fast tier sees them.
+  const feed = (end) => {
+    const out = [];
+    for (let m = 60; m >= 0; m--) {
+      const t = new Date(end - m * 60_000).toISOString().replace(/\.\d{3}Z$/, "Z");
+      out.push({ time_tag: t, bz_gsm: (end / 60_000 + m) % 7, bt: 5, source: "SOLAR1" });
+    }
+    return out;
+  };
+  let a = mergeSeries([], Array.from({ length: 1440 }, (_, i) => magRow(1440 - i)), NOW);
+  let b = a;
+  for (let tick = 0; tick < 90; tick++) {
+    const now = NOW + tick * 120_000 + 17_000;
+    const fresh = feed(now - 17_000);
+    a = mergeSeries(a, fresh, now);
+    b = appendSeries(b, fresh, now);
+    assert.deepEqual(b, a, `tick ${tick}`);
+  }
+});
+
+test("a hole between the stored series and the fresh hour is a gap", () => {
+  const prev = [magRow(120), magRow(90)];
+  assert.equal(leavesGap(prev, [{ time_tag: ago(89) + "Z" }]), false);
+  assert.equal(leavesGap(prev, [{ time_tag: ago(95) + "Z" }]), false); // overlap
+  assert.equal(leavesGap(prev, [{ time_tag: ago(60) + "Z" }]), true);
+  assert.equal(leavesGap([], [{ time_tag: ago(60) }]), false);
+});
+
+test("liveBody is byte-for-byte JSON.stringify(live)", () => {
+  const state = {
+    mag: [magRow(2), magRow(1)], wind: [{ time_tag: ago(1), proton_speed: 400 }], hemi: [],
+    source: "SOLAR1", hemi_latest: { north: 1, south: 2 },
+    latest: { bz: 1, speed: 400, mag_time: toIsoZ(ago(1)), wind_time: toIsoZ(ago(1)) },
+  };
+  const live = assembleLive(state);
+  assert.equal(liveBody(live), JSON.stringify(live));
+  const json = { mag: JSON.stringify(state.mag), wind: JSON.stringify(state.wind), hemi: "[]" };
+  assert.equal(liveBody(live, json), JSON.stringify(live));
+});
+
+// ── the repair feed ────────────────────────────────────────────────────────
+
+const H = ["time_tag", "speed", "density", "temperature", "bx", "by", "bz", "bt", "vx", "vy", "vz", "propagated_time_tag"];
+const fullTable = (hours) => {
+  const t = [H];
+  for (let m = hours * 60; m >= 0; m--) {
+    const tag = ago(m) + "Z";
+    t.push([tag, 400 + m, 5, 1e5, 1, 2, (m % 9) - 4, 6, -400, 0, 0, tag]);
+  }
+  return t;
+};
+
+test("sliceFrom parses only the tail, and returns what a full parse would", () => {
+  const table = fullTable(72);
+  // NOAA's layout: one row per line.
+  const text = "[" + table.map((r) => JSON.stringify(r)).join(",\n") + "]";
+  const cutoff = NOW - SERIES_WINDOW_MS;
+  const { header, rows } = sliceFrom(text, cutoff);
+  assert.deepEqual(header, H);
+  assert.ok(rows.length < 26 * 60 && rows.length >= 24 * 60, `rows=${rows.length}`);
+  const full = table.slice(1).filter((r) => r[0] >= rows[0][0]);
+  assert.deepEqual(rows, full);
+  // Rebuilt series are identical whichever way the table was read.
+  const viaSlice = propagatedRows(header, rows, "SOLAR1");
+  const viaFull = propagatedRows(table[0], table.slice(1), "SOLAR1");
+  assert.deepEqual(rebuildSeries(viaSlice.mag, MAG_FIELDS, NOW), rebuildSeries(viaFull.mag, MAG_FIELDS, NOW));
+  assert.deepEqual(rebuildSeries(viaSlice.wind, WIND_FIELDS, NOW), rebuildSeries(viaFull.wind, WIND_FIELDS, NOW));
+});
+
+test("sliceFrom falls back to a full parse when the cutoff hour is missing", () => {
+  const table = [H, [ago(5) + "Z", 400, 5, 1e5, 1, 2, -3, 6, 0, 0, 0, null]];
+  const { rows } = sliceFrom(JSON.stringify(table), NOW - SERIES_WINDOW_MS);
+  assert.deepEqual(rows, table.slice(1));
+});
+
+test("state round-trips, and its repair bookkeeping is readable from a HEAD", async () => {
+  const objs = new Map();
+  const bucket = {
+    async put(k, body, o) { objs.set(k, { body, meta: o.customMetadata }); },
+    async get(k) { const o = objs.get(k); return o && { json: async () => JSON.parse(o.body) }; },
+    async head(k) { const o = objs.get(k); return o && { customMetadata: o.meta }; },
+  };
+  const state = { mag: [magRow(1)], wind: [], latest: { bz: 1 }, source: "SOLAR1", repaired_at: "2026-09-16T00:00:00.000Z", source_at: null, gap_at: null };
+  await writeSeriesState(bucket, state, { mag: JSON.stringify(state.mag) });
+  const back = await readSeriesState(bucket);
+  assert.deepEqual({ ...back, cold: undefined }, { ...state, cold: undefined });
+  assert.deepEqual(await readSeriesMeta(bucket), { repaired_at: state.repaired_at, source_at: null, gap_at: null });
+  assert.equal(await readSeriesMeta({ head: async () => null }), null);
 });
 
 test("a bundle without bz or speed is refused, keeping the last good one", () => {

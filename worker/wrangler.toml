@@ -33,9 +33,10 @@ bucket_name = "aurora-data"
 #            the gap.
 #   3,35     slow tier: DONKI. Hours-scale data, and DONKI should be touched
 #            as little as the app tolerates.
-#   15,47    repair tier: one full RTSW feed per run, mag before the half
-#            hour and wind after. ~2.7-2.9 ms of JSON.parse each, which only
-#            fits when it is the sole job in the invocation.
+#   15,47    repair tier: usually a HEAD and nothing else. Rebuilds both
+#            series from the 7-day propagated feed after a gap or every 12 h,
+#            and reads RTSW mag once a day for the spacecraft id. See
+#            tickRepair in index.js.
 #   27,59    hemi archive: folds the fast tier's 30-hour hemi window into the
 #            3-day archive. It ran inside the slow tier at first and took
 #            that tier from ~4 ms to 8-13 ms. Runs a few minutes before each

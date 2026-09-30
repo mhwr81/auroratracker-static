@@ -21,10 +21,10 @@
  *    simultaneous so that two never land on the same minute.
  *
  * 2. THE SOLAR WIND SERIES IS STATE, NOT A RECOMPUTATION. The 3-minute tick
- *    reads a 6.5 KB propagated feed (0.02 ms) and appends; a full RTSW read
- *    repairs one feed per hour on its own invocation. See series.js for why
- *    the small feed is trustworthy and how the repair tier keeps the series
- *    from drifting.
+ *    reads a 6.5 KB propagated feed (0.02 ms) and appends; the repair tier
+ *    rebuilds both series after a gap and twice a day regardless. See
+ *    series.js for why the small feed is trustworthy and tickRepair for how
+ *    the series is kept from drifting.
  *
  * On the routes that were tried and rejected
  * ------------------------------------------
@@ -48,7 +48,10 @@ import {
   WIND_FIELDS,
   toIsoZ,
   fetchPropagated,
-  mergeSeries,
+  fetchPropagatedDay,
+  appendSeries,
+  leavesGap,
+  readSeriesMeta,
   rebuildSeries,
   readSeriesState,
   writeSeriesState,
@@ -372,7 +375,25 @@ function publishable(live) {
   return null;
 }
 
-async function publishLive(env, state, label) {
+/**
+ * JSON.stringify(live), reusing series arrays the caller already serialised
+ * for state. The fast tier writes the same ~130 KB of series to state and to
+ * live.json on every tick, so stringifying it once instead of twice is a
+ * real share of a 10 ms budget. `series` is the last key of assembleLive's
+ * document, which is what makes appending it here produce identical bytes.
+ */
+export function liveBody(live, json = {}) {
+  const { series, ...head } = live;
+  const part = (k) => (series[k] === null ? "null" : json[k] ?? JSON.stringify(series[k]));
+  return `${JSON.stringify(head).slice(0, -1)},"series":{"mag":${part("mag")},"wind":${part("wind")},"hemi":${part("hemi")}}}`;
+}
+
+/** Each array serialised once, for writeSeriesState, writeHemiState and liveBody. */
+function serialise(state, hemi) {
+  return { mag: JSON.stringify(state.mag), wind: JSON.stringify(state.wind), hemi: JSON.stringify(hemi) };
+}
+
+async function publishLive(env, state, label, json = {}) {
   const live = assembleLive(state);
   const reject = publishable(live);
   if (reject) {
@@ -380,7 +401,7 @@ async function publishLive(env, state, label) {
     return { written: false, reason: reject, live };
   }
 
-  const body = JSON.stringify(live);
+  const body = liveBody(live, json);
   await env.BUCKET.put(OUT_KEY, body, {
     httpMetadata: { contentType: "application/json", cacheControl: CACHE_CONTROL },
   });
@@ -429,8 +450,13 @@ async function tickFast(env) {
   const now = Date.now();
 
   if (sw) {
-    state.mag = mergeSeries(state.mag, sw.mag, now);
-    state.wind = mergeSeries(state.wind, sw.wind, now);
+    // An empty series or a hole at the join is something only the repair
+    // tier can fill; flag it so the next repair slot rebuilds.
+    if (state.mag.length === 0 || leavesGap(state.mag, sw.mag) || leavesGap(state.wind, sw.wind)) {
+      state.gap_at = new Date(now).toISOString();
+    }
+    state.mag = appendSeries(state.mag, sw.mag, now);
+    state.wind = appendSeries(state.wind, sw.wind, now);
     const m = sw.latestMag ?? {};
     const w = sw.latestWind ?? {};
     state.latest = {
@@ -456,33 +482,117 @@ async function tickFast(env) {
     hs.hemi_latest = hemi.latest;
   }
 
-  await Promise.all([writeSeriesState(env.BUCKET, state), writeHemiState(env.BUCKET, hs)]);
+  const json = serialise(state, hs.hemi);
+  await Promise.all([writeSeriesState(env.BUCKET, state, json), writeHemiState(env.BUCKET, hs, json.hemi)]);
   const view = { ...state, hemi: hs.hemi, hemi_latest: hs.hemi_latest };
-  const out = await publishLive(env, view, `fast ${Date.now() - started}ms`);
+  const out = await publishLive(env, view, `fast ${Date.now() - started}ms`, json);
   return { ...out, state: view };
 }
 
 // ── the repair tier ────────────────────────────────────────────────────────
 
 /**
- * Rebuild ONE feed's series from the full RTSW file, replacing it wholesale.
- *
- * One feed per invocation because the budget is 10 ms. The files grew by
- * half when IMAP joined the feed (mag 1.7 MB, wind 3.0 MB), which pushed
- * this tier to ~11 ms typical and ~25 ms worst in production; parsing only
- * the active spacecraft's rows (activeRecordsFromText) roughly halves it.
+ * The repair tier: rebuild the series wholesale when there is a reason to.
  *
  * Wholesale replacement rather than a merge is the point. This is what stops
  * the series being append-only state that can drift from NOAA with no way
  * back: anything the fast tier got wrong, or missed during an outage longer
- * than the propagated feed's one-hour memory, is gone within the hour. RTSW
- * carries 24 hours, which is exactly the window the series keeps.
+ * than the propagated feed's one-hour memory, is replaced by the next
+ * rebuild.
  *
- * This is also the only tier that sees `source` — the satellite id is not in
- * the propagated feed, so it is parked in state for the fast tier to stamp
- * onto its rows.
+ * It used to rebuild one feed from RTSW on every run, 48 times a day, and
+ * every one of those ran 12-27 ms against a 10 ms budget: the RTSW files are
+ * 1.6 and 2.9 MB, and decompressing and decoding them costs several ms
+ * before any JavaScript runs, so no amount of parser work could fit it. But
+ * the fast tier already re-merges the last 60 minutes every 2 minutes from a
+ * feed identical to RTSW, so a rebuild only changes anything after a gap or
+ * a late revision. The slots still run twice an hour, and most of them now
+ * cost a HEAD request:
+ *
+ *   gap flagged by the fast tier     rebuild both from the 7-day propagated feed
+ *   no rebuild for REBUILD_EVERY_MS  the same, to catch late revisions
+ *   no RTSW read for SOURCE_EVERY_MS one RTSW mag rebuild, the only feed that
+ *                                    names the spacecraft (`source`)
+ *
+ * That is ~3 expensive runs a day instead of 48, plus one per real outage.
  */
-async function tickRepair(env, which) {
+const REBUILD_EVERY_MS = 12 * 3600_000;
+const SOURCE_EVERY_MS = 24 * 3600_000;
+
+/** What this repair slot should do: "rebuild", "rtsw", or null for nothing. */
+export function repairDue(meta, nowMs = Date.now()) {
+  const older = (iso, ms) => !iso || !(nowMs - Date.parse(iso) < ms);
+  if (!meta || meta.gap_at) return "rebuild";
+  if (older(meta.repaired_at, REBUILD_EVERY_MS)) return "rebuild";
+  if (older(meta.source_at, SOURCE_EVERY_MS)) return "rtsw";
+  return null;
+}
+
+async function tickRepair(env) {
+  const action = repairDue(await readSeriesMeta(env.BUCKET));
+  if (action === "rebuild") return rebuildFromPropagated(env);
+  if (action === "rtsw") return repairFromRtsw(env, "mag");
+  console.log("repair: nothing due");
+  return { repaired: false, reason: "not due" };
+}
+
+/**
+ * Rebuild both series from the last day of the 7-day propagated feed. Rows
+ * the fast tier stored after the feed's newest are kept -- the 1-hour feed
+ * can be a few minutes ahead -- and `latest` is left to the fast tier,
+ * which reads the fresher of the two.
+ */
+async function rebuildFromPropagated(env) {
+  const started = Date.now();
+  const [state, hs] = await Promise.all([readSeriesState(env.BUCKET), readHemiState(env.BUCKET)]);
+  const now = Date.now();
+  const sw = await fetchPropagatedDay(now, state.source);
+
+  const replace = (stored, rows, fields) => {
+    const rebuilt = rebuildSeries(rows, fields, now, state.source);
+    if (rebuilt.length === 0) return stored;
+    const last = rebuilt[rebuilt.length - 1].time_tag;
+    let i = stored.length;
+    while (i > 0 && stored[i - 1].time_tag > last) i--;
+    return i === stored.length ? rebuilt : rebuilt.concat(stored.slice(i));
+  };
+  state.mag = replace(state.mag, sw.mag, MAG_FIELDS);
+  state.wind = replace(state.wind, sw.wind, WIND_FIELDS);
+  if (!state.latest?.mag_time || !state.latest?.wind_time) {
+    const m = sw.latestMag ?? {}, w = sw.latestWind ?? {};
+    state.latest = {
+      ...state.latest,
+      ...(!state.latest?.mag_time && sw.latestMag && {
+        bz: m.bz_gsm ?? null, bt: m.bt ?? null, bx: m.bx_gsm ?? null, by: m.by_gsm ?? null,
+        mag_time: toIsoZ(m.time_tag),
+      }),
+      ...(!state.latest?.wind_time && sw.latestWind && {
+        speed: w.proton_speed ?? null, density: w.proton_density ?? null,
+        temperature: w.proton_temperature ?? null, wind_time: toIsoZ(w.time_tag),
+      }),
+    };
+  }
+  state.repaired_at = new Date(now).toISOString();
+  state.gap_at = null;
+
+  const json = serialise(state, hs.hemi);
+  await writeSeriesState(env.BUCKET, state, json);
+  const view = { ...state, hemi: hs.hemi, hemi_latest: hs.hemi_latest };
+  const out = await publishLive(env, view, `repair:rebuild ${Date.now() - started}ms`, json);
+  console.log(`repair rebuild: mag=${state.mag.length} wind=${state.wind.length} points`);
+  return { ...out, repaired: true, which: "both", state: view };
+}
+
+/**
+ * Rebuild ONE feed's series from the full RTSW file, replacing it wholesale.
+ *
+ * Now run once a day, for `source` -- the satellite id is not in the
+ * propagated feed, so it is parked in state for the other tiers to stamp
+ * onto their rows. Parsing only the active spacecraft's rows
+ * (activeRecordsFromText) keeps the JavaScript side small, but the download
+ * alone is over budget; once a day, that is tolerated.
+ */
+async function repairFromRtsw(env, which) {
   const started = Date.now();
   const url = which === "mag" ? MAG_URL : WIND_URL;
   const fields = which === "mag" ? MAG_FIELDS : WIND_FIELDS;
@@ -522,9 +632,12 @@ async function tickRepair(env, which) {
         }),
   };
 
-  await writeSeriesState(env.BUCKET, state);
+  state.source_at = new Date().toISOString();
+
+  const json = serialise(state, hs.hemi);
+  await writeSeriesState(env.BUCKET, state, json);
   const view = { ...state, hemi: hs.hemi, hemi_latest: hs.hemi_latest };
-  const out = await publishLive(env, view, `repair:${which} ${Date.now() - started}ms`);
+  const out = await publishLive(env, view, `repair:${which} ${Date.now() - started}ms`, json);
   console.log(
     `repair ${which}: ${sel.length} active -> ${rebuilt.length} points, source=${source}`
   );
@@ -596,11 +709,6 @@ async function runAlerts(env) {
 
 // ── entry points ───────────────────────────────────────────────────────────
 
-/** Alternate the two feeds so only one full RTSW parse lands per invocation. */
-function repairTarget(now = new Date()) {
-  return now.getUTCMinutes() < 30 ? "mag" : "wind";
-}
-
 export default {
   /**
    * One job per invocation, so each gets its own 10 ms of CPU. Nothing is
@@ -623,7 +731,7 @@ export default {
           console.log(`hemi archive run failed: ${e.stack || e.message}`)
         ));
       case CRON_REPAIR:
-        return void (await tickRepair(env, repairTarget()).catch((e) =>
+        return void (await tickRepair(env).catch((e) =>
           console.log(`repair run failed: ${e.stack || e.message}`)
         ));
       case CRON_FAST:
@@ -708,7 +816,8 @@ export default {
             dry_run: true,
             cold: series.cold,
             hemi_cold: hs.cold,
-            next_repair: repairTarget(),
+            next_repair: repairDue(await readSeriesMeta(env.BUCKET)) ?? "nothing due",
+            repair: { repaired_at: series.repaired_at, source_at: series.source_at, gap_at: series.gap_at },
             would_publish: publishable(live) === null,
             reject_reason: publishable(live),
             counts: { mag: state.mag.length, wind: state.wind.length, hemi: state.hemi.length },
@@ -751,4 +860,4 @@ function span(rows, key) {
   return { from: rows[0]?.[key] ?? null, to: rows[rows.length - 1]?.[key] ?? null };
 }
 
-export { assembleLive, publishable, activeRecords, mergeHemi, repairTarget, tickFast, tickRepair };
+export { assembleLive, publishable, activeRecords, mergeHemi, tickFast, tickRepair, rebuildFromPropagated, repairFromRtsw };
