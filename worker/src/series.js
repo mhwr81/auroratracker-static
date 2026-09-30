@@ -462,14 +462,6 @@ export async function readSeriesState(bucket) {
   }
 }
 
-/** The bookkeeping alone, from a HEAD. Null when there is no state yet. */
-export async function readSeriesMeta(bucket) {
-  const obj = await bucket.head(STATE_KEY);
-  if (!obj) return null;
-  const m = obj.customMetadata ?? {};
-  return { repaired_at: m.repaired_at || null, source_at: m.source_at || null, gap_at: m.gap_at || null };
-}
-
 /**
  * Only the solar wind half -- the hemi window lives in HEMI_KEY.
  *
@@ -484,8 +476,78 @@ export async function writeSeriesState(bucket, state, json = {}) {
     `${JSON.stringify(meta).slice(1)}`;
   await bucket.put(STATE_KEY, body, {
     httpMetadata: { contentType: "application/json", cacheControl: "no-store" },
-    customMetadata: Object.fromEntries(Object.entries(meta).map(([k, v]) => [k, v ?? ""])),
   });
+}
+
+// ── the tail ───────────────────────────────────────────────────────────────
+
+/**
+ * The fast tier's own state: the last TAIL_MS of every series, plus the
+ * current readings. The fast tier reads and writes only this.
+ *
+ * It exists so the 2-minute tick stops moving the whole day. The full series
+ * (internal/series.json + internal/hemi.json, ~130 KB) used to be parsed,
+ * merged, serialised and written twice -- state and live.json -- on every
+ * tick, which is most of what kept that tier near 10 ms. Now the tail is
+ * folded into the full series by the repair slot twice an hour, and the app
+ * merges the two public halves (v2/now.json over v2/series.json) itself.
+ *
+ * Two hours because the full series is republished at worst every 32
+ * minutes, the app holds it for up to 5 more, and the edge for up to 10:
+ * the tail has to reach back past all of that, and past one missed fold.
+ *
+ *   gap_at  set when fresh rows could not be joined to the tail; the repair
+ *           slot turns it into a rebuild
+ *   source  the spacecraft id to stamp on rows, owned by the repair slot's
+ *           daily RTSW read
+ */
+export const TAIL_KEY = "internal/tail.json";
+export const TAIL_MS = 2 * 3600_000;
+
+export async function readTail(bucket) {
+  try {
+    const obj = await bucket.get(TAIL_KEY);
+    if (!obj) return { mag: [], wind: [], hemi: [], latest: {}, hemi_latest: null, source: null, gap_at: null, cold: true };
+    const s = (await obj.json()) ?? {};
+    return {
+      mag: Array.isArray(s.mag) ? s.mag : [],
+      wind: Array.isArray(s.wind) ? s.wind : [],
+      hemi: Array.isArray(s.hemi) ? s.hemi : [],
+      latest: s.latest ?? {},
+      hemi_latest: s.hemi_latest ?? null,
+      source: s.source ?? null,
+      gap_at: s.gap_at ?? null,
+      cold: false,
+    };
+  } catch (e) {
+    console.log(`tail read failed: ${e.message}`);
+    return { mag: [], wind: [], hemi: [], latest: {}, hemi_latest: null, source: null, gap_at: null, cold: true };
+  }
+}
+
+/** `json` optionally carries the three arrays already serialised. */
+export async function writeTail(bucket, tail, json = {}) {
+  const rest = { latest: tail.latest ?? {}, hemi_latest: tail.hemi_latest ?? null, source: tail.source ?? null, gap_at: tail.gap_at ?? null };
+  const body =
+    `{"mag":${json.mag ?? JSON.stringify(tail.mag)},"wind":${json.wind ?? JSON.stringify(tail.wind)},` +
+    `"hemi":${json.hemi ?? JSON.stringify(tail.hemi)},${JSON.stringify(rest).slice(1)}`;
+  await bucket.put(TAIL_KEY, body, {
+    httpMetadata: { contentType: "application/json", cacheControl: "no-store" },
+  });
+}
+
+/**
+ * Rows at or after `cutoffMs`. Rows are sorted, so this is a scan from the
+ * newest end. `key` is time_tag (bare, mag/wind) or time (hemi, with Z).
+ */
+export function since(rows, cutoffMs, key = "time_tag") {
+  let i = rows.length;
+  while (i > 0) {
+    const t = Date.parse(toIsoZ(rows[i - 1]?.[key]));
+    if (!(t >= cutoffMs)) break;
+    i--;
+  }
+  return i === 0 ? rows : rows.slice(i);
 }
 
 /**

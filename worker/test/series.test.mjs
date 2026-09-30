@@ -29,9 +29,11 @@ import {
   propagatedRows,
   writeSeriesState,
   readSeriesState,
-  readSeriesMeta,
+  readTail,
+  writeTail,
+  since,
 } from "../src/series.js";
-import { repairDue, assembleLive, publishable, liveBody } from "../src/index.js";
+import { repairDue, assembleLive, assembleNow, publishable, liveBody, seriesBody } from "../src/index.js";
 
 const NOW = Date.parse("2026-09-16T12:00:00Z");
 
@@ -340,19 +342,56 @@ test("sliceFrom falls back to a full parse when the cutoff hour is missing", () 
   assert.deepEqual(rows, table.slice(1));
 });
 
-test("state round-trips, and its repair bookkeeping is readable from a HEAD", async () => {
+const memBucket = () => {
   const objs = new Map();
-  const bucket = {
-    async put(k, body, o) { objs.set(k, { body, meta: o.customMetadata }); },
-    async get(k) { const o = objs.get(k); return o && { json: async () => JSON.parse(o.body) }; },
-    async head(k) { const o = objs.get(k); return o && { customMetadata: o.meta }; },
+  return {
+    objs,
+    async put(k, body) { objs.set(k, body); },
+    async get(k) { const o = objs.get(k); return o === undefined ? null : { json: async () => JSON.parse(o), text: async () => o }; },
   };
+};
+
+test("state and tail round-trip, including the repair bookkeeping", async () => {
+  const bucket = memBucket();
   const state = { mag: [magRow(1)], wind: [], latest: { bz: 1 }, source: "SOLAR1", repaired_at: "2026-09-16T00:00:00.000Z", source_at: null, gap_at: null };
   await writeSeriesState(bucket, state, { mag: JSON.stringify(state.mag) });
   const back = await readSeriesState(bucket);
   assert.deepEqual({ ...back, cold: undefined }, { ...state, cold: undefined });
-  assert.deepEqual(await readSeriesMeta(bucket), { repaired_at: state.repaired_at, source_at: null, gap_at: null });
-  assert.equal(await readSeriesMeta({ head: async () => null }), null);
+
+  const tail = { mag: [magRow(1)], wind: [], hemi: [{ time: "2026-09-16T12:30:00Z", north: 1, south: 2 }], latest: { bz: 1 }, hemi_latest: null, source: "SOLAR1", gap_at: null };
+  await writeTail(bucket, tail, { mag: JSON.stringify(tail.mag) });
+  assert.deepEqual({ ...(await readTail(bucket)), cold: undefined }, { ...tail, cold: undefined });
+  assert.equal((await readTail(memBucket())).cold, true);
+});
+
+test("since keeps rows at or after the cutoff, for both key spellings", () => {
+  const rows = [magRow(130), magRow(120), magRow(60), magRow(1)];
+  assert.deepEqual(since(rows, NOW - 120 * 60_000), rows.slice(1));
+  const hemi = [{ time: toIsoZ(ago(200)) }, { time: toIsoZ(ago(100)) }, { time: toIsoZ(ago(-30)) }];
+  assert.deepEqual(since(hemi, NOW - 120 * 60_000, "time"), hemi.slice(1));
+  assert.deepEqual(since([], NOW), []);
+});
+
+test("v2/now.json carries v1's readings, with the tail in place of the series", () => {
+  const tail = {
+    mag: [magRow(1)], wind: [], hemi: [], source: "SOLAR1", hemi_latest: { north: 1, south: 2 },
+    latest: { bz: 1, speed: 400, mag_time: new Date().toISOString(), wind_time: new Date().toISOString() },
+  };
+  const v1 = assembleLive(tail);
+  const now = assembleNow(tail);
+  assert.equal(now.schema, "v2");
+  assert.deepEqual(now.solar_wind, v1.solar_wind);
+  assert.deepEqual(now.hemispheric_power, v1.hemispheric_power);
+  assert.deepEqual(now.tail, v1.series);
+  assert.equal(now.series, undefined);
+  assert.equal(publishable(now), null);
+});
+
+test("v2/series.json is valid JSON with null for empty series", () => {
+  const view = { mag: [magRow(2), magRow(1)], wind: [], hemi: [] };
+  const doc = JSON.parse(seriesBody(view, { mag: JSON.stringify(view.mag) }));
+  assert.equal(doc.schema, "v2");
+  assert.deepEqual(doc.series, { mag: view.mag, wind: null, hemi: null });
 });
 
 test("a bundle without bz or speed is refused, keeping the last good one", () => {

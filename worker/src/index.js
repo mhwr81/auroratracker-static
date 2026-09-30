@@ -51,7 +51,10 @@ import {
   fetchPropagatedDay,
   appendSeries,
   leavesGap,
-  readSeriesMeta,
+  readTail,
+  writeTail,
+  since,
+  TAIL_MS,
   rebuildSeries,
   readSeriesState,
   writeSeriesState,
@@ -383,9 +386,7 @@ function publishable(live) {
  * document, which is what makes appending it here produce identical bytes.
  */
 export function liveBody(live, json = {}) {
-  const { series, ...head } = live;
-  const part = (k) => (series[k] === null ? "null" : json[k] ?? JSON.stringify(series[k]));
-  return `${JSON.stringify(head).slice(0, -1)},"series":{"mag":${part("mag")},"wind":${part("wind")},"hemi":${part("hemi")}}}`;
+  return docBody(live, "series", json);
 }
 
 /** Each array serialised once, for writeSeriesState, writeHemiState and liveBody. */
@@ -414,10 +415,127 @@ async function publishLive(env, state, label, json = {}) {
   return { written: true, bytes: body.length, live };
 }
 
+// ── the v2 split ───────────────────────────────────────────────────────────
+
+/**
+ * v2 splits live.json in two, so the 2-minute tick stops rewriting the day:
+ *
+ *   v2/now.json     every fast tick: the current readings and the last
+ *                   TAIL_MS of each series (~25 KB)
+ *   v2/series.json  every repair slot (twice an hour): the full series
+ *
+ * The app fetches both, holds series.json for 5 minutes, and merges the tail
+ * over it (BundleService.live), which gives it the same document v1/live.json
+ * was. No new cron: the fold rides the repair slot, which reads the same
+ * state anyway and otherwise has nothing to do on most runs.
+ */
+const V2_NOW_KEY = "v2/now.json";
+const V2_SERIES_KEY = "v2/series.json";
+const V2_SERIES_CACHE_CONTROL = "public, max-age=300, stale-while-revalidate=300";
+
+/**
+ * How v1/live.json is kept for installs that predate v2 -- LEGACY_LIVE in
+ * wrangler.toml:
+ *
+ *   tick  every fast tick, exactly as before. The default, and what to run
+ *         until the v2 app has rolled out: it costs the fast tier what it
+ *         cost before the split, because it has to read the full series.
+ *   fold  twice an hour from the repair slot. Old installs' readings can then
+ *         be ~30 minutes old, so switch only once few of them are left.
+ *   off   not written.
+ */
+function legacyMode(env) {
+  const m = (env.LEGACY_LIVE || "").trim();
+  return m === "fold" || m === "off" ? m : "tick";
+}
+
+/** JSON.stringify(doc), with doc[key] -- an object of arrays -- built from `json`. */
+function docBody(doc, key, json = {}) {
+  const { [key]: parts, ...head } = doc;
+  const part = (k) => (parts[k] === null ? "null" : json[k] ?? JSON.stringify(parts[k]));
+  return `${JSON.stringify(head).slice(0, -1)},"${key}":{"mag":${part("mag")},"wind":${part("wind")},"hemi":${part("hemi")}}}`;
+}
+
+/** The v2 current-conditions document: v1's readings, the tail in place of the series. */
+export function assembleNow(tail) {
+  const { series, ...head } = assembleLive(tail);
+  return { ...head, schema: "v2", tail: series };
+}
+
+async function publishNow(env, tail, json, label) {
+  const doc = assembleNow(tail);
+  const reject = publishable(doc);
+  if (reject) {
+    console.log(`REFUSED to write: ${reject} — keeping previous ${V2_NOW_KEY}`);
+    return { written: false, reason: reject };
+  }
+  const body = docBody(doc, "tail", json);
+  await env.BUCKET.put(V2_NOW_KEY, body, {
+    httpMetadata: { contentType: "application/json", cacheControl: CACHE_CONTROL },
+  });
+  console.log(`[${label}] wrote ${V2_NOW_KEY} ${body.length}B — bz=${doc.solar_wind.bz} speed=${doc.solar_wind.speed}`);
+  return { written: true, bytes: body.length };
+}
+
+/** The v2 series document. Empty series are null, as in v1. */
+export function seriesBody(view, json = {}) {
+  const doc = {
+    schema: "v2",
+    generated: new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
+    series: {
+      mag: view.mag.length > 0 ? view.mag : null,
+      wind: view.wind.length > 0 ? view.wind : null,
+      hemi: view.hemi.length > 0 ? view.hemi : null,
+    },
+  };
+  return docBody(doc, "series", json);
+}
+
+/**
+ * The full series with the tail folded in: the same merge the fast tier used
+ * to do every tick against the whole day. Readings and source come from the
+ * tail, which is always the fresher of the two.
+ */
+function overlay(state, hs, tail, nowMs) {
+  return {
+    mag: appendSeries(state.mag, tail.mag, nowMs),
+    wind: appendSeries(state.wind, tail.wind, nowMs),
+    hemi: tail.hemi.length > 0 ? mergeHemi(hs.hemi, tail.hemi, nowMs) : hs.hemi,
+    latest: { ...state.latest, ...tail.latest },
+    hemi_latest: tail.hemi_latest ?? hs.hemi_latest,
+    source: tail.source ?? state.source,
+  };
+}
+
+/**
+ * A tail cut from the full state, for the first tick after the split and for
+ * recovery if internal/tail.json is ever lost.
+ */
+async function seedTail(env, state, hs, nowMs) {
+  [state, hs] = await Promise.all([
+    state ?? readSeriesState(env.BUCKET),
+    hs ?? readHemiState(env.BUCKET),
+  ]);
+  if (hs.cold) hs.hemi = await hemiFromPublished(env);
+  const cut = nowMs - TAIL_MS;
+  console.log("cold tail: seeding from the full series");
+  return {
+    mag: since(state.mag, cut),
+    wind: since(state.wind, cut),
+    hemi: since(hs.hemi, cut, "time"),
+    latest: state.latest ?? {},
+    hemi_latest: hs.hemi_latest ?? null,
+    source: state.source ?? null,
+    gap_at: null,
+    cold: false,
+  };
+}
+
 // ── the fast tier ──────────────────────────────────────────────────────────
 
 /**
- * Every 3 minutes: 6.5 KB of solar wind and 11.6 KB of hemispheric power.
+ * Every 2 minutes: 6.5 KB of solar wind and ~14 KB of hemispheric power,
+ * into the tail.
  *
  * Both fetches are allowed to fail independently and neither failure blanks
  * anything — state simply keeps what it had. That is the whole reason the
@@ -426,18 +544,16 @@ async function publishLive(env, state, label, json = {}) {
  */
 async function tickFast(env) {
   const started = Date.now();
-  const [state, hs] = await Promise.all([readSeriesState(env.BUCKET), readHemiState(env.BUCKET)]);
-
-  // A cold hemi state is a migration of the layout. Only the hemi window is
-  // worth rescuing — mag and wind refill from the propagated feed within the
-  // hour and are rebuilt wholesale at the next repair tick anyway.
-  if (hs.cold) {
-    hs.hemi = await hemiFromPublished(env);
-    console.log(`cold start: seeded ${hs.hemi.length} hemi rows from ${OUT_KEY}`);
-  }
+  const legacy = legacyMode(env) === "tick";
+  let [tail, state, hs] = await Promise.all([
+    readTail(env.BUCKET),
+    legacy ? readSeriesState(env.BUCKET) : null,
+    legacy ? readHemiState(env.BUCKET) : null,
+  ]);
+  if (tail.cold) tail = await seedTail(env, state, hs, Date.now());
 
   const [sw, hemi] = await Promise.all([
-    fetchPropagated(state.source).catch((e) => {
+    fetchPropagated(tail.source).catch((e) => {
       console.log(`propagated fetch failed: ${e.message}`);
       return null;
     }),
@@ -448,19 +564,20 @@ async function tickFast(env) {
   ]);
 
   const now = Date.now();
+  const cut = now - TAIL_MS;
 
   if (sw) {
-    // An empty series or a hole at the join is something only the repair
-    // tier can fill; flag it so the next repair slot rebuilds.
-    if (state.mag.length === 0 || leavesGap(state.mag, sw.mag) || leavesGap(state.wind, sw.wind)) {
-      state.gap_at = new Date(now).toISOString();
+    // A hole at the join means the fast tier was down for longer than the
+    // propagated feed's one-hour memory; only a rebuild can fill it.
+    if (leavesGap(tail.mag, sw.mag) || leavesGap(tail.wind, sw.wind)) {
+      tail.gap_at = new Date(now).toISOString();
     }
-    state.mag = appendSeries(state.mag, sw.mag, now);
-    state.wind = appendSeries(state.wind, sw.wind, now);
+    tail.mag = since(appendSeries(tail.mag, sw.mag, now), cut);
+    tail.wind = since(appendSeries(tail.wind, sw.wind, now), cut);
     const m = sw.latestMag ?? {};
     const w = sw.latestWind ?? {};
-    state.latest = {
-      ...state.latest,
+    tail.latest = {
+      ...tail.latest,
       ...(sw.latestMag && {
         bz: m.bz_gsm ?? null,
         bt: m.bt ?? null,
@@ -478,38 +595,42 @@ async function tickFast(env) {
   }
 
   if (hemi) {
-    hs.hemi = mergeHemi(hs.hemi, hemi.series, now);
-    hs.hemi_latest = hemi.latest;
+    tail.hemi = since(mergeHemi(tail.hemi, since(hemi.series, cut, "time"), now), cut, "time");
+    tail.hemi_latest = hemi.latest;
   }
 
-  const json = serialise(state, hs.hemi);
-  await Promise.all([writeSeriesState(env.BUCKET, state, json), writeHemiState(env.BUCKET, hs, json.hemi)]);
-  const view = { ...state, hemi: hs.hemi, hemi_latest: hs.hemi_latest };
-  const out = await publishLive(env, view, `fast ${Date.now() - started}ms`, json);
-  return { ...out, state: view };
+  const json = { mag: JSON.stringify(tail.mag), wind: JSON.stringify(tail.wind), hemi: JSON.stringify(tail.hemi) };
+  const label = `fast ${Date.now() - started}ms`;
+  const [, out] = await Promise.all([
+    writeTail(env.BUCKET, tail, json),
+    publishNow(env, tail, json, label),
+    legacy ? publishLive(env, overlay(state, hs, tail, now), label) : null,
+  ]);
+  return { ...out, tail };
 }
 
 // ── the repair tier ────────────────────────────────────────────────────────
 
 /**
- * The repair tier: rebuild the series wholesale when there is a reason to.
+ * The repair slot: fold the tail into the full series and publish
+ * v2/series.json, rebuilding the series wholesale first when there is a
+ * reason to.
  *
- * Wholesale replacement rather than a merge is the point. This is what stops
- * the series being append-only state that can drift from NOAA with no way
- * back: anything the fast tier got wrong, or missed during an outage longer
- * than the propagated feed's one-hour memory, is replaced by the next
- * rebuild.
+ * Wholesale replacement rather than a merge is the point of a rebuild. This
+ * is what stops the series being append-only state that can drift from NOAA
+ * with no way back: anything the fast tier got wrong, or missed during an
+ * outage longer than the propagated feed's one-hour memory, is replaced.
  *
- * It used to rebuild one feed from RTSW on every run, 48 times a day, and
- * every one of those ran 12-27 ms against a 10 ms budget: the RTSW files are
- * 1.6 and 2.9 MB, and decompressing and decoding them costs several ms
+ * Rebuilds used to run on every slot, one feed from RTSW, 48 times a day,
+ * and every one of those ran 12-27 ms against a 10 ms budget: the RTSW files
+ * are 1.6 and 2.9 MB, and decompressing and decoding them costs several ms
  * before any JavaScript runs, so no amount of parser work could fit it. But
  * the fast tier already re-merges the last 60 minutes every 2 minutes from a
  * feed identical to RTSW, so a rebuild only changes anything after a gap or
- * a late revision. The slots still run twice an hour, and most of them now
- * cost a HEAD request:
+ * a late revision:
  *
- *   gap flagged by the fast tier     rebuild both from the 7-day propagated feed
+ *   gap flagged, or the tail no      rebuild both from the 7-day propagated
+ *   longer joins the series          feed
  *   no rebuild for REBUILD_EVERY_MS  the same, to catch late revisions
  *   no RTSW read for SOURCE_EVERY_MS one RTSW mag rebuild, the only feed that
  *                                    names the spacecraft (`source`)
@@ -529,25 +650,60 @@ export function repairDue(meta, nowMs = Date.now()) {
 }
 
 async function tickRepair(env) {
-  const action = repairDue(await readSeriesMeta(env.BUCKET));
-  if (action === "rebuild") return rebuildFromPropagated(env);
-  if (action === "rtsw") return repairFromRtsw(env, "mag");
-  console.log("repair: nothing due");
-  return { repaired: false, reason: "not due" };
+  const started = Date.now();
+  const [state, hs, tail] = await Promise.all([
+    readSeriesState(env.BUCKET),
+    readHemiState(env.BUCKET),
+    readTail(env.BUCKET),
+  ]);
+  const now = Date.now();
+
+  // A gap the fast tier saw after the last rebuild, or a tail that no longer
+  // reaches back to the series (folds missing for longer than TAIL_MS).
+  if (!tail.cold) {
+    const unrepaired = tail.gap_at && !(state.repaired_at && state.repaired_at >= tail.gap_at);
+    if (unrepaired || leavesGap(state.mag, tail.mag)) state.gap_at = tail.gap_at ?? new Date(now).toISOString();
+  }
+
+  const action = repairDue(state.cold ? null : state, now);
+  if (action === "rebuild") {
+    await rebuildFromPropagated(state, now);
+  } else if (action === "rtsw") {
+    const source = await repairFromRtsw(state, "mag", now);
+    // The fast tier stamps rows with the tail's copy.
+    if (source && !tail.cold && source !== tail.source) {
+      tail.source = source;
+      await writeTail(env.BUCKET, tail);
+    }
+  }
+
+  const view = tail.cold ? { ...state, hemi: hs.hemi, hemi_latest: hs.hemi_latest } : overlay(state, hs, tail, now);
+  Object.assign(state, { mag: view.mag, wind: view.wind, latest: view.latest, source: view.source });
+  hs.hemi = view.hemi;
+  hs.hemi_latest = view.hemi_latest;
+
+  const json = serialise(state, hs.hemi);
+  const label = `repair:${action ?? "fold"} ${Date.now() - started}ms`;
+  const body = seriesBody(view, json);
+  await Promise.all([
+    writeSeriesState(env.BUCKET, state, json),
+    writeHemiState(env.BUCKET, hs, json.hemi),
+    env.BUCKET.put(V2_SERIES_KEY, body, {
+      httpMetadata: { contentType: "application/json", cacheControl: V2_SERIES_CACHE_CONTROL },
+    }),
+    legacyMode(env) === "fold" ? publishLive(env, view, label, json) : null,
+  ]);
+  console.log(`[${label}] wrote ${V2_SERIES_KEY} ${body.length}B — mag=${view.mag.length} wind=${view.wind.length} hemi=${view.hemi.length}`);
+  return { repaired: action !== null, action, view };
 }
 
 /**
- * Rebuild both series from the last day of the 7-day propagated feed. Rows
- * the fast tier stored after the feed's newest are kept -- the 1-hour feed
- * can be a few minutes ahead -- and `latest` is left to the fast tier,
- * which reads the fresher of the two.
+ * Rebuild both series in `state` from the last day of the 7-day propagated
+ * feed. Rows stored after the feed's newest are kept -- the 1-hour feed can
+ * be a few minutes ahead -- and the fold lays the tail over the result.
  */
-async function rebuildFromPropagated(env) {
-  const started = Date.now();
-  const [state, hs] = await Promise.all([readSeriesState(env.BUCKET), readHemiState(env.BUCKET)]);
-  const now = Date.now();
+async function rebuildFromPropagated(state, now) {
   const sw = await fetchPropagatedDay(now, state.source);
-
   const replace = (stored, rows, fields) => {
     const rebuilt = rebuildSeries(rows, fields, now, state.source);
     if (rebuilt.length === 0) return stored;
@@ -558,90 +714,38 @@ async function rebuildFromPropagated(env) {
   };
   state.mag = replace(state.mag, sw.mag, MAG_FIELDS);
   state.wind = replace(state.wind, sw.wind, WIND_FIELDS);
-  if (!state.latest?.mag_time || !state.latest?.wind_time) {
-    const m = sw.latestMag ?? {}, w = sw.latestWind ?? {};
-    state.latest = {
-      ...state.latest,
-      ...(!state.latest?.mag_time && sw.latestMag && {
-        bz: m.bz_gsm ?? null, bt: m.bt ?? null, bx: m.bx_gsm ?? null, by: m.by_gsm ?? null,
-        mag_time: toIsoZ(m.time_tag),
-      }),
-      ...(!state.latest?.wind_time && sw.latestWind && {
-        speed: w.proton_speed ?? null, density: w.proton_density ?? null,
-        temperature: w.proton_temperature ?? null, wind_time: toIsoZ(w.time_tag),
-      }),
-    };
-  }
   state.repaired_at = new Date(now).toISOString();
   state.gap_at = null;
-
-  const json = serialise(state, hs.hemi);
-  await writeSeriesState(env.BUCKET, state, json);
-  const view = { ...state, hemi: hs.hemi, hemi_latest: hs.hemi_latest };
-  const out = await publishLive(env, view, `repair:rebuild ${Date.now() - started}ms`, json);
   console.log(`repair rebuild: mag=${state.mag.length} wind=${state.wind.length} points`);
-  return { ...out, repaired: true, which: "both", state: view };
 }
 
 /**
- * Rebuild ONE feed's series from the full RTSW file, replacing it wholesale.
+ * Rebuild ONE feed's series in `state` from the full RTSW file, and return
+ * the spacecraft id it names.
  *
- * Now run once a day, for `source` -- the satellite id is not in the
- * propagated feed, so it is parked in state for the other tiers to stamp
- * onto their rows. Parsing only the active spacecraft's rows
- * (activeRecordsFromText) keeps the JavaScript side small, but the download
- * alone is over budget; once a day, that is tolerated.
+ * Run once a day, for `source` -- the satellite id is not in the propagated
+ * feed. Parsing only the active spacecraft's rows (activeRecordsFromText)
+ * keeps the JavaScript side small, but the download alone is over budget;
+ * once a day, that is tolerated.
  */
-async function repairFromRtsw(env, which) {
-  const started = Date.now();
+async function repairFromRtsw(state, which, now) {
   const url = which === "mag" ? MAG_URL : WIND_URL;
   const fields = which === "mag" ? MAG_FIELDS : WIND_FIELDS;
-
-  const [state, hs] = await Promise.all([readSeriesState(env.BUCKET), readHemiState(env.BUCKET)]);
 
   const sel = activeRecordsFromText(await get(url));
   if (sel.length === 0) {
     console.log(`repair ${which}: no usable records, keeping previous series`);
-    return { repaired: false, which };
+    return null;
   }
-
-  const newest = sel[sel.length - 1];
-  const source = newest.source ?? state.source ?? null;
+  const source = sel[sel.length - 1].source ?? state.source ?? null;
 
   // Replace rather than merge — that is what makes this a repair and not
   // another append. See rebuildSeries for why it is not mergeSeries([], ...).
-  const rebuilt = rebuildSeries(sel, fields, Date.now(), source);
-
+  state[which] = rebuildSeries(sel, fields, now, source);
   state.source = source;
-  state[which] = rebuilt;
-  state.latest = {
-    ...state.latest,
-    ...(which === "mag"
-      ? {
-          bz: newest.bz_gsm ?? null,
-          bt: newest.bt ?? null,
-          bx: newest.bx_gsm ?? null,
-          by: newest.by_gsm ?? null,
-          mag_time: toIsoZ(newest.time_tag),
-        }
-      : {
-          speed: newest.proton_speed ?? null,
-          density: newest.proton_density ?? null,
-          temperature: newest.proton_temperature ?? null,
-          wind_time: toIsoZ(newest.time_tag),
-        }),
-  };
-
-  state.source_at = new Date().toISOString();
-
-  const json = serialise(state, hs.hemi);
-  await writeSeriesState(env.BUCKET, state, json);
-  const view = { ...state, hemi: hs.hemi, hemi_latest: hs.hemi_latest };
-  const out = await publishLive(env, view, `repair:${which} ${Date.now() - started}ms`, json);
-  console.log(
-    `repair ${which}: ${sel.length} active -> ${rebuilt.length} points, source=${source}`
-  );
-  return { ...out, repaired: true, which, points: rebuilt.length, state: view };
+  state.source_at = new Date(now).toISOString();
+  console.log(`repair ${which}: ${sel.length} active -> ${state[which].length} points, source=${source}`);
+  return source;
 }
 
 // ── alerts ─────────────────────────────────────────────────────────────────
@@ -808,16 +912,23 @@ export default {
     // being asked and keeps the response readable.
     if (url.pathname === "/state") {
       try {
-        const [series, hs] = await Promise.all([readSeriesState(env.BUCKET), readHemiState(env.BUCKET)]);
-        const state = { ...series, hemi: hs.hemi, hemi_latest: hs.hemi_latest };
+        const [series, hs, tail] = await Promise.all([
+          readSeriesState(env.BUCKET), readHemiState(env.BUCKET), readTail(env.BUCKET),
+        ]);
+        const state = tail.cold
+          ? { ...series, hemi: hs.hemi, hemi_latest: hs.hemi_latest }
+          : overlay(series, hs, tail, Date.now());
         const live = assembleLive(state);
         return Response.json(
           {
             dry_run: true,
             cold: series.cold,
             hemi_cold: hs.cold,
-            next_repair: repairDue(await readSeriesMeta(env.BUCKET)) ?? "nothing due",
-            repair: { repaired_at: series.repaired_at, source_at: series.source_at, gap_at: series.gap_at },
+            tail_cold: tail.cold,
+            legacy_live: legacyMode(env),
+            next_repair: repairDue(series.cold ? null : series) ?? "fold only",
+            repair: { repaired_at: series.repaired_at, source_at: series.source_at, gap_at: series.gap_at, tail_gap_at: tail.gap_at },
+            tail_counts: { mag: tail.mag.length, wind: tail.wind.length, hemi: tail.hemi.length },
             would_publish: publishable(live) === null,
             reject_reason: publishable(live),
             counts: { mag: state.mag.length, wind: state.wind.length, hemi: state.hemi.length },
@@ -860,4 +971,4 @@ function span(rows, key) {
   return { from: rows[0]?.[key] ?? null, to: rows[rows.length - 1]?.[key] ?? null };
 }
 
-export { assembleLive, publishable, activeRecords, mergeHemi, tickFast, tickRepair, rebuildFromPropagated, repairFromRtsw };
+export { assembleLive, publishable, activeRecords, mergeHemi, tickFast, tickRepair };
