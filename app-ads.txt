@@ -166,3 +166,6 @@ rubiconproject.com, 15268, RESELLER, 0bfd66d529a55807
 rubiconproject.com, 25060, RESELLER, 0bfd66d529a55807
 rubiconproject.com, 28169, RESELLER, 0bfd66d529a55807
 stroeer.com, 17379, RESELLER
+
+# Liftoff Monetize (formerly Vungle)
+vungle.com, 6ad28eceb0b4a336610b003c, DIRECT, c107d686becd2d77
