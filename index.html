@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Aurora Tracker — Aurora Forecasts &amp; Space Weather Alerts</title>
+<meta name="description" content="Aurora Tracker for Android: real-time aurora forecasts, live space weather, and alerts for geomagnetic storms, solar flares and CMEs.">
+<meta name="color-scheme" content="dark">
+<link rel="canonical" href="https://auroratracker.app/">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Aurora Tracker">
+<meta property="og:description" content="Real-time aurora forecasts, live space weather and storm alerts for Android.">
+<meta property="og:url" content="https://auroratracker.app/">
+<meta property="og:image" content="https://auroratracker.app/aurora.jpg">
+<style>
+  :root {
+    --bg: #0b0c0e;
+    --card: #16181b;
+    --rule: #24272c;
+    --text: #f2f3f5;
+    --muted: #a1a5ab;
+    --faint: #6c7077;
+    --green: #34d399;
+    --amber: #fbbf24;
+    --blue: #60a5fa;
+    --violet: #a78bfa;
+    --max: 60rem;
+  }
+
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+          "Helvetica Neue", Arial, sans-serif;
+  }
+
+  a { color: inherit; }
+
+  .wrap { max-width: var(--max); margin: 0 auto; padding: 0 1rem; }
+
+  /* ── Hero ─────────────────────────────────────────── */
+  .hero {
+    position: relative;
+    min-height: 78vh;
+    display: flex;
+    align-items: flex-end;
+    background: url("aurora.jpg") center 35% / cover no-repeat, var(--bg);
+  }
+  .hero::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(to bottom,
+      rgba(11, 12, 14, .15) 0%,
+      rgba(11, 12, 14, .55) 55%,
+      var(--bg) 100%);
+  }
+  .hero .wrap { position: relative; width: 100%; padding-bottom: 3.5rem; }
+
+  .eyebrow {
+    margin: 0 0 .75rem;
+    font-size: .78rem;
+    font-weight: 700;
+    letter-spacing: .14em;
+    text-transform: uppercase;
+    color: var(--green);
+  }
+  h1 {
+    margin: 0;
+    font-size: clamp(2.4rem, 8vw, 4.2rem);
+    line-height: 1.05;
+    letter-spacing: -.02em;
+  }
+  .lede {
+    margin: 1rem 0 2rem;
+    max-width: 34rem;
+    font-size: clamp(1.05rem, 3vw, 1.25rem);
+    color: #d6d9de;
+  }
+
+  .cta {
+    display: inline-flex;
+    align-items: center;
+    gap: .6rem;
+    padding: .85rem 1.4rem;
+    border-radius: 999px;
+    background: var(--text);
+    color: var(--bg);
+    font-weight: 700;
+    text-decoration: none;
+    transition: transform .15s ease, background .15s ease;
+  }
+  .cta:hover { background: #ffffff; transform: translateY(-1px); }
+  .cta:focus-visible { outline: 2px solid var(--green); outline-offset: 3px; }
+  .cta svg { width: 1.1rem; height: 1.1rem; flex: none; }
+  .cta-note { display: block; margin-top: .75rem; font-size: .85rem; color: var(--muted); }
+
+  /* ── Features ─────────────────────────────────────── */
+  section { padding: 3.5rem 0 0; }
+  h2 {
+    margin: 0 0 1.5rem;
+    font-size: 1.5rem;
+    letter-spacing: -.01em;
+  }
+
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+    gap: 1rem;
+  }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--rule);
+    border-radius: 16px;
+    padding: 1.4rem;
+  }
+  .card h3 {
+    margin: 0 0 .4rem;
+    font-size: 1.05rem;
+    display: flex;
+    align-items: center;
+    gap: .55rem;
+  }
+  .card p { margin: 0; color: var(--muted); font-size: .95rem; }
+  .dot { width: .6rem; height: .6rem; border-radius: 50%; flex: none; }
+
+  /* ── Pro ──────────────────────────────────────────── */
+  .pro {
+    background: linear-gradient(135deg, rgba(167, 139, 250, .14), rgba(52, 211, 153, .08)), var(--card);
+    border: 1px solid rgba(167, 139, 250, .35);
+    border-radius: 20px;
+    padding: 1.75rem 1.4rem;
+  }
+  .pro h2 { margin-bottom: .35rem; }
+  .pro .price { margin: 0 0 1.25rem; color: var(--violet); font-weight: 600; }
+  .pro ul {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+    gap: .6rem 1.5rem;
+  }
+  .pro li { position: relative; padding-left: 1.4rem; color: #d6d9de; }
+  .pro li::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: .55em;
+    width: .5rem;
+    height: .5rem;
+    border-radius: 50%;
+    background: var(--violet);
+  }
+
+  /* ── Footer ───────────────────────────────────────── */
+  footer {
+    margin-top: 4rem;
+    padding: 2rem 0 3rem;
+    border-top: 1px solid var(--rule);
+    color: var(--faint);
+    font-size: .875rem;
+  }
+  footer .wrap { display: flex; flex-wrap: wrap; gap: .5rem 1.5rem; justify-content: space-between; }
+  footer a { color: var(--muted); }
+  footer a:hover { color: var(--text); }
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="wrap">
+    <p class="eyebrow">Aurora Tracker for Android</p>
+    <h1>Know when to<br>look up.</h1>
+    <p class="lede">Real-time aurora forecasts, live space weather and alerts for geomagnetic storms, solar flares and CMEs, so you're outside when the sky lights up.</p>
+    <a class="cta" href="https://play.google.com/store/apps/details?id=com.auroradev.tracker">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M4 2.5v19a1 1 0 0 0 1.5.86L21 13.4a1.6 1.6 0 0 0 0-2.8L5.5 1.64A1 1 0 0 0 4 2.5Z"/></svg>
+      Get it on Google Play
+    </a>
+    <span class="cta-note">Free to download. Optional one-time Pro upgrade.</span>
+  </div>
+</header>
+
+<main class="wrap">
+  <section aria-labelledby="features">
+    <h2 id="features">Everything you need on a storm night</h2>
+    <div class="grid">
+      <div class="card">
+        <h3><span class="dot" style="background: var(--green)"></span>Live conditions</h3>
+        <p>Solar wind, Bz, Kp and Hp30, hemispheric power and aurora probability for your location, updated through the night.</p>
+      </div>
+      <div class="card">
+        <h3><span class="dot" style="background: var(--blue)"></span>Storm alerts</h3>
+        <p>Notifications for geomagnetic storms, strong solar flares and incoming CMEs, at the thresholds you choose.</p>
+      </div>
+      <div class="card">
+        <h3><span class="dot" style="background: var(--amber)"></span>Solar activity</h3>
+        <p>Sunspot regions, X-ray flares, CME forecasts, SDO imagery and NOAA's three-day outlook in one place.</p>
+      </div>
+      <div class="card">
+        <h3><span class="dot" style="background: var(--violet)"></span>Learn as you go</h3>
+        <p>A built-in guide to what every number means and which ones actually decide whether tonight is worth it.</p>
+      </div>
+    </div>
+  </section>
+
+  <section aria-labelledby="pro">
+    <div class="pro">
+      <h2 id="pro">Aurora Tracker Pro</h2>
+      <p class="price">One-time purchase. No subscription.</p>
+      <ul>
+        <li>Should I Go? — tonight's go / no-go verdict</li>
+        <li>Hourly cloud cover forecast</li>
+        <li>Local weather and viewing quality score</li>
+        <li>Hunt Log to record your sightings</li>
+        <li>Local time across every chart</li>
+        <li>No ads</li>
+      </ul>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>Space weather data from NOAA SWPC and NASA.</span>
+    <span><a href="privacy.html">Privacy policy</a> · © 2026 Aurora Tracker</span>
+  </div>
+</footer>
+
+</body>
+</html>
