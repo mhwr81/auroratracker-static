@@ -1,0 +1,3 @@
+# Authorized sellers for Aurora Tracker (com.auroradev.tracker)
+# IAB Tech Lab app-ads.txt spec: https://iabtechlab.com/ads-txt/
+google.com, pub-2462898645424195, DIRECT, f08c47fec0942fa0
