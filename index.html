@@ -2,165 +2,362 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Aurora Tracker — Aurora Forecasts &amp; Space Weather Alerts</title>
 <meta name="description" content="Aurora Tracker for Android: real-time aurora forecasts, live space weather, and alerts for geomagnetic storms, solar flares and CMEs.">
 <meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#070910">
 <link rel="canonical" href="https://auroratracker.app/">
+<link rel="icon" href="img/icon.webp" type="image/webp">
+<link rel="preload" href="fonts/bricolage-grotesque-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="fonts/figtree-latin.woff2" as="font" type="font/woff2" crossorigin>
 <meta property="og:type" content="website">
 <meta property="og:title" content="Aurora Tracker">
 <meta property="og:description" content="Real-time aurora forecasts, live space weather and storm alerts for Android.">
 <meta property="og:url" content="https://auroratracker.app/">
 <meta property="og:image" content="https://auroratracker.app/aurora.jpg">
 <style>
+  @font-face {
+    font-family: "Bricolage Grotesque";
+    font-weight: 600 800;
+    font-display: swap;
+    src: url("fonts/bricolage-grotesque-latin.woff2") format("woff2");
+  }
+  @font-face {
+    font-family: "Figtree";
+    font-weight: 400 700;
+    font-display: swap;
+    src: url("fonts/figtree-latin.woff2") format("woff2");
+  }
+  @font-face {
+    font-family: "JetBrains Mono";
+    font-weight: 500;
+    font-display: swap;
+    src: url("fonts/jetbrains-mono-latin.woff2") format("woff2");
+    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+  }
+  @font-face {
+    font-family: "JetBrains Mono";
+    font-weight: 500;
+    font-display: swap;
+    src: url("fonts/jetbrains-mono-cyrillic.woff2") format("woff2");
+    unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+  }
+  /* Layout: photo hero → fanned phones on a glossy floor → alternating text/phone rows → Pro panel → closing CTA. Dark only, like the app. */
   :root {
-    --bg: #0b0c0e;
-    --card: #16181b;
-    --rule: #24272c;
-    --text: #f2f3f5;
-    --muted: #a1a5ab;
-    --faint: #6c7077;
-    --green: #34d399;
+    --night: #070910;
+    --panel: #10131c;
+    --rule: #1f2433;
+    --text: #eef1f7;
+    --muted: #9aa3b5;
+    --faint: #687086;
+    --green: #3ee6a0;
+    --magenta: #ec4f9c;
+    --violet: #a98bff;
     --amber: #fbbf24;
-    --blue: #60a5fa;
-    --violet: #a78bfa;
-    --max: 60rem;
+    --display: "Bricolage Grotesque", "Segoe UI", system-ui, sans-serif;
+    --body: "Figtree", -apple-system, "Segoe UI", Roboto, sans-serif;
+    --mono: "JetBrains Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+    --max: 68rem;
+    color-scheme: dark;
   }
 
   * { box-sizing: border-box; }
-  html { -webkit-text-size-adjust: 100%; }
-
   body {
     margin: 0;
-    background: var(--bg);
+    background: var(--night);
     color: var(--text);
-    font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
-          "Helvetica Neue", Arial, sans-serif;
+    font: 17px/1.6 var(--body);
+    overflow-x: hidden;
+  }
+  a { color: inherit; }
+  img { display: block; max-width: 100%; }
+  .wrap {
+    max-width: var(--max);
+    margin: 0 auto;
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px));
   }
 
-  a { color: inherit; }
-
-  .wrap { max-width: var(--max); margin: 0 auto; padding: 0 1rem; }
-
-  /* ── Hero ─────────────────────────────────────────── */
+  /* ── Hero ───────────────────────────────────────── */
   .hero {
     position: relative;
-    min-height: 78vh;
-    display: flex;
-    align-items: flex-end;
-    background: url("aurora.jpg") center 35% / cover no-repeat, var(--bg);
+    isolation: isolate;
+    overflow-x: clip;
+    padding-block: 4.5rem 0;
+    text-align: center;
+    background: url("img/hero.webp") center 30% / cover no-repeat, var(--night);
   }
   .hero::before {
+    /* slow pink/violet curtain drifting over the green photo */
     content: "";
     position: absolute;
     inset: 0;
-    background: linear-gradient(to bottom,
-      rgba(11, 12, 14, .15) 0%,
-      rgba(11, 12, 14, .55) 55%,
-      var(--bg) 100%);
+    z-index: -1;
+    background:
+      radial-gradient(60% 45% at 30% 10%, rgba(236, 79, 156, .38), transparent 70%),
+      radial-gradient(50% 40% at 75% 5%, rgba(169, 139, 255, .32), transparent 70%);
+    mix-blend-mode: screen;
+    animation: drift 18s ease-in-out infinite alternate;
   }
-  .hero .wrap { position: relative; width: 100%; padding-bottom: 3.5rem; }
-
-  .eyebrow {
-    margin: 0 0 .75rem;
-    font-size: .78rem;
-    font-weight: 700;
-    letter-spacing: .14em;
-    text-transform: uppercase;
-    color: var(--green);
+  .hero::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    background: linear-gradient(to bottom, rgba(7, 9, 16, .2) 0%, rgba(7, 9, 16, .35) 45%, var(--night) 82%);
   }
-  h1 {
-    margin: 0;
-    font-size: clamp(2.4rem, 8vw, 4.2rem);
-    line-height: 1.05;
-    letter-spacing: -.02em;
-  }
-  .lede {
-    margin: 1rem 0 2rem;
-    max-width: 34rem;
-    font-size: clamp(1.05rem, 3vw, 1.25rem);
-    color: #d6d9de;
+  @keyframes drift {
+    from { transform: translateX(-4%) scaleY(1); opacity: .8; }
+    to   { transform: translateX(4%) scaleY(1.12); opacity: 1; }
   }
 
-  .cta {
+  .brand {
     display: inline-flex;
     align-items: center;
-    gap: .6rem;
-    padding: .85rem 1.4rem;
-    border-radius: 999px;
-    background: var(--text);
-    color: var(--bg);
-    font-weight: 700;
-    text-decoration: none;
-    transition: transform .15s ease, background .15s ease;
+    gap: .9rem;
+    margin: 0 0 2rem;
+    font: 800 clamp(1.9rem, 6vw, 3rem)/1 var(--display);
+    letter-spacing: -.02em;
   }
-  .cta:hover { background: #ffffff; transform: translateY(-1px); }
-  .cta:focus-visible { outline: 2px solid var(--green); outline-offset: 3px; }
-  .cta svg { width: 1.1rem; height: 1.1rem; flex: none; }
-  .cta-note { display: block; margin-top: .75rem; font-size: .85rem; color: var(--muted); }
+  .brand img {
+    width: clamp(3rem, 9vw, 4.25rem);
+    height: auto;
+    border-radius: 22%;
+    box-shadow: 0 0 0 1px rgba(255, 255, 255, .14), 0 10px 30px rgba(236, 79, 156, .35);
+  }
+  h1 {
+    margin: 0 auto;
+    max-width: 16ch;
+    font: 800 clamp(2.6rem, 8.5vw, 5.4rem)/.98 var(--display);
+    letter-spacing: -.035em;
+    text-wrap: balance;
+  }
+  h1 em {
+    font-style: normal;
+    background: linear-gradient(100deg, var(--green), #7ff0c8 40%, var(--magenta) 85%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+  .lede {
+    margin: 1.25rem auto 2rem;
+    max-width: 38rem;
+    font-size: clamp(1.05rem, 2.6vw, 1.25rem);
+    color: #d3d8e3;
+    text-wrap: balance;
+  }
 
-  /* ── Features ─────────────────────────────────────── */
-  section { padding: 3.5rem 0 0; }
-  h2 {
-    margin: 0 0 1.5rem;
-    font-size: 1.5rem;
-    letter-spacing: -.01em;
-  }
-
-  .grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
-    gap: 1rem;
-  }
-  .card {
-    background: var(--card);
-    border: 1px solid var(--rule);
-    border-radius: 16px;
-    padding: 1.4rem;
-  }
-  .card h3 {
-    margin: 0 0 .4rem;
-    font-size: 1.05rem;
-    display: flex;
+  .play {
+    display: inline-flex;
     align-items: center;
-    gap: .55rem;
+    gap: .75rem;
+    padding: .7rem 1.4rem .7rem 1.1rem;
+    border-radius: 999px;
+    background: #000;
+    color: #fff;
+    text-decoration: none;
+    box-shadow: 0 0 0 1px rgba(255, 255, 255, .25), 0 12px 30px rgba(0, 0, 0, .5);
+    transition: transform .15s ease, box-shadow .15s ease;
   }
-  .card p { margin: 0; color: var(--muted); font-size: .95rem; }
-  .dot { width: .6rem; height: .6rem; border-radius: 50%; flex: none; }
+  .play:hover { transform: translateY(-2px); box-shadow: 0 0 0 1px rgba(255, 255, 255, .5), 0 16px 36px rgba(62, 230, 160, .25); }
+  .play:focus-visible { outline: 2px solid var(--green); outline-offset: 4px; }
+  .play svg { width: 1.6rem; height: 1.6rem; flex: none; }
+  .play span { display: grid; text-align: left; line-height: 1.1; }
+  .play small { font-size: .68rem; letter-spacing: .08em; text-transform: uppercase; color: #c9ced8; }
+  .play b { font: 700 1.15rem/1.1 var(--body); }
+  .cta-note { display: block; margin-top: .9rem; font-size: .88rem; color: var(--muted); }
 
-  /* ── Pro ──────────────────────────────────────────── */
-  .pro {
-    background: linear-gradient(135deg, rgba(167, 139, 250, .14), rgba(52, 211, 153, .08)), var(--card);
-    border: 1px solid rgba(167, 139, 250, .35);
-    border-radius: 20px;
-    padding: 1.75rem 1.4rem;
+  /* ── Phone fan ──────────────────────────────────── */
+  .stage {
+    position: relative;
+    margin-top: 3.5rem;
+    padding-bottom: 9rem;
   }
-  .pro h2 { margin-bottom: .35rem; }
-  .pro .price { margin: 0 0 1.25rem; color: var(--violet); font-weight: 600; }
+  .stage::before {
+    /* glossy floor the phones stand on */
+    content: "";
+    position: absolute;
+    left: 50%;
+    bottom: 0;
+    width: min(120rem, 140vw);
+    height: 13rem;
+    transform: translateX(-50%);
+    background:
+      radial-gradient(55% 70% at 50% 0%, rgba(169, 139, 255, .22), transparent 70%),
+      linear-gradient(to bottom, #151827, var(--night));
+    border-top: 1px solid rgba(255, 255, 255, .08);
+    z-index: -1;
+  }
+  .fan {
+    display: flex;
+    justify-content: center;
+    align-items: flex-end;
+    perspective: 1600px;
+  }
+  .phone {
+    position: relative;
+    flex: none;
+    width: var(--w);
+    margin: 0 calc(var(--w) * -.06);
+    padding: calc(var(--w) * .028);
+    border-radius: calc(var(--w) * .14);
+    background: linear-gradient(145deg, #3a3f4c, #14161c 40%, #24272f);
+    box-shadow:
+      inset 0 0 0 1px rgba(255, 255, 255, .12),
+      0 30px 60px rgba(0, 0, 0, .55);
+    transform: rotateY(var(--ry, 0deg)) translateZ(var(--tz, 0));
+    -webkit-box-reflect: below 10px linear-gradient(transparent 72%, rgba(255, 255, 255, .22));
+    animation: rise .9s cubic-bezier(.2, .7, .2, 1) both;
+    animation-delay: var(--d, 0s);
+  }
+  .phone img {
+    width: 100%;
+    aspect-ratio: 540 / 1212;
+    object-fit: cover;
+    border-radius: calc(var(--w) * .115);
+    background: #0b0d12;
+  }
+  .phone::after {
+    /* punch-hole camera */
+    content: "";
+    position: absolute;
+    top: calc(var(--w) * .055);
+    left: 50%;
+    width: calc(var(--w) * .045);
+    aspect-ratio: 1;
+    border-radius: 50%;
+    transform: translateX(-50%);
+    background: #050608;
+    box-shadow: 0 0 0 1px rgba(255, 255, 255, .08);
+  }
+  .fan .p1 { --w: clamp(7rem, 15vw, 12.5rem); --ry: 24deg; --d: .25s; z-index: 1; }
+  .fan .p2 { --w: clamp(8rem, 17vw, 14rem);   --ry: 14deg; --d: .15s; z-index: 2; }
+  .fan .p3 { --w: clamp(9.5rem, 20vw, 16.5rem); --tz: 40px; --d: 0s; z-index: 3; }
+  .fan .p4 { --w: clamp(8rem, 17vw, 14rem);   --ry: -14deg; --d: .15s; z-index: 2; }
+  .fan .p5 { --w: clamp(7rem, 15vw, 12.5rem); --ry: -24deg; --d: .25s; z-index: 1; }
+  @keyframes rise {
+    from { translate: 0 40px; }
+    to   { translate: 0 0; }
+  }
+
+  /* ── Feature rows ───────────────────────────────── */
+  .section-head { margin: 1rem 0 3rem; text-align: center; }
+  h2 {
+    margin: 0;
+    font: 800 clamp(1.9rem, 4.6vw, 2.9rem)/1.05 var(--display);
+    letter-spacing: -.025em;
+    text-wrap: balance;
+  }
+  .section-head p { margin: .75rem auto 0; max-width: 34rem; color: var(--muted); }
+
+  .rows { display: grid; gap: 5rem; }
+  .row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 2rem 4rem;
+  }
+  .row:nth-child(even) { grid-template-columns: auto minmax(0, 1fr); }
+  .row:nth-child(even) .copy { order: 2; }
+  .row .phone { --w: clamp(13rem, 26vw, 16rem); margin: 0; animation: none; -webkit-box-reflect: unset; }
+  .row .glow { position: relative; justify-self: center; }
+  .row .glow::before {
+    content: "";
+    position: absolute;
+    inset: 10% -25%;
+    background: radial-gradient(closest-side, var(--tint), transparent);
+    opacity: .35;
+    filter: blur(20px);
+    z-index: -1;
+  }
+  .copy { min-width: 0; max-width: 32rem; }
+  .tag {
+    margin: 0 0 .8rem;
+    font: 500 .75rem/1 var(--mono);
+    letter-spacing: .12em;
+    text-transform: uppercase;
+    color: var(--tint);
+  }
+  h3 {
+    margin: 0 0 .75rem;
+    font: 800 clamp(1.5rem, 3.4vw, 2.1rem)/1.1 var(--display);
+    letter-spacing: -.02em;
+    text-wrap: balance;
+  }
+  .copy > p { margin: 0 0 1.25rem; color: #c6ccd8; }
+  .readings {
+    display: flex;
+    flex-wrap: wrap;
+    gap: .5rem;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+  .readings li {
+    padding: .35rem .7rem;
+    border: 1px solid var(--rule);
+    border-radius: .5rem;
+    background: var(--panel);
+    font: 500 .8rem/1.3 var(--mono);
+    color: var(--muted);
+  }
+  .readings b { color: var(--text); font-weight: 500; }
+
+  /* ── Pro ────────────────────────────────────────── */
+  .pro {
+    position: relative;
+    overflow: hidden;
+    margin-top: 6rem;
+    padding: clamp(1.75rem, 5vw, 3.5rem);
+    border-radius: 1.75rem;
+    border: 1px solid rgba(169, 139, 255, .35);
+    background:
+      radial-gradient(70% 90% at 100% 0%, rgba(236, 79, 156, .2), transparent 60%),
+      radial-gradient(60% 80% at 0% 100%, rgba(62, 230, 160, .12), transparent 60%),
+      var(--panel);
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 2.5rem;
+    align-items: center;
+  }
+  .pro .tag { color: var(--violet); }
+  .pro h2 { text-align: left; }
+  .price { margin: .6rem 0 1.5rem; font-weight: 700; color: var(--violet); }
   .pro ul {
     margin: 0;
     padding: 0;
     list-style: none;
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
-    gap: .6rem 1.5rem;
+    gap: .65rem 1.5rem;
   }
-  .pro li { position: relative; padding-left: 1.4rem; color: #d6d9de; }
+  .pro li { position: relative; padding-left: 1.5rem; color: #d3d8e3; }
   .pro li::before {
     content: "";
     position: absolute;
     left: 0;
-    top: .55em;
-    width: .5rem;
-    height: .5rem;
+    top: .5em;
+    width: .6rem;
+    height: .6rem;
     border-radius: 50%;
-    background: var(--violet);
+    background: linear-gradient(135deg, var(--violet), var(--magenta));
   }
+  .pro .pass { margin: 1.5rem 0 0; font-size: .92rem; color: var(--muted); }
+  .pro-phones { display: flex; align-items: flex-end; }
+  .pro-phones .phone { --w: clamp(9rem, 17vw, 12rem); animation: none; -webkit-box-reflect: unset; }
+  .pro-phones .phone:first-child { --ry: 0deg; transform: rotate(-5deg); margin-right: -1.5rem; z-index: 1; }
+  .pro-phones .phone:last-child { transform: rotate(5deg) translateY(-1.5rem); }
 
-  /* ── Footer ───────────────────────────────────────── */
+  /* ── Closing ────────────────────────────────────── */
+  .closing { padding-block: 6rem 2rem; text-align: center; }
+  .closing h2 { margin-bottom: .75rem; }
+  .closing p { margin: 0 auto 2rem; max-width: 32rem; color: var(--muted); }
+  .langs { margin-top: 2.5rem; font: 500 .8rem/1.6 var(--mono); color: var(--faint); letter-spacing: .04em; }
+
   footer {
-    margin-top: 4rem;
-    padding: 2rem 0 3rem;
+    margin-top: 3rem;
+    padding-block: 2rem 3rem;
     border-top: 1px solid var(--rule);
     color: var(--faint);
     font-size: .875rem;
@@ -168,49 +365,125 @@
   footer .wrap { display: flex; flex-wrap: wrap; gap: .5rem 1.5rem; justify-content: space-between; }
   footer a { color: var(--muted); }
   footer a:hover { color: var(--text); }
+
+  /* ── Narrow screens ─────────────────────────────── */
+  @media (max-width: 760px) {
+    .fan .p1, .fan .p5 { display: none; }
+    .fan .p2, .fan .p4 { --w: 29vw; }
+    .fan .p3 { --w: 37vw; }
+    .stage { padding-bottom: 6rem; }
+    .row, .row:nth-child(even) { grid-template-columns: minmax(0, 1fr); }
+    .row:nth-child(even) .copy { order: 0; }
+    .row .phone { --w: min(15rem, 62vw); }
+    .pro { grid-template-columns: minmax(0, 1fr); }
+    .pro-phones { justify-content: center; }
+    .pro-phones .phone { --w: 36vw; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .hero::before, .phone { animation: none; }
+  }
 </style>
 </head>
 <body>
-
 <header class="hero">
   <div class="wrap">
-    <p class="eyebrow">Aurora Tracker for Android</p>
-    <h1>Know when to<br>look up.</h1>
+    <p class="brand"><img src="img/icon.webp" alt="" width="96" height="96">Aurora Tracker</p>
+    <h1>Know when to <em>look up.</em></h1>
     <p class="lede">Real-time aurora forecasts, live space weather and alerts for geomagnetic storms, solar flares and CMEs, so you're outside when the sky lights up.</p>
-    <a class="cta" href="https://play.google.com/store/apps/details?id=com.auroradev.tracker">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M4 2.5v19a1 1 0 0 0 1.5.86L21 13.4a1.6 1.6 0 0 0 0-2.8L5.5 1.64A1 1 0 0 0 4 2.5Z"/></svg>
-      Get it on Google Play
+    <a class="play" href="https://play.google.com/store/apps/details?id=com.auroradev.tracker">
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path fill="#00d7fe" d="M3.6 1.8 13.4 12 3.6 22.2c-.4-.2-.6-.6-.6-1.1V2.9c0-.5.2-.9.6-1.1Z"/>
+        <path fill="#00f076" d="m16.8 8.6-3.4 3.4L3.6 1.8c.2-.1.5-.1.8 0l12.4 6.8Z"/>
+        <path fill="#ff3a44" d="M16.8 15.4 4.4 22.2c-.3.1-.6.1-.8 0L13.4 12l3.4 3.4Z"/>
+        <path fill="#ffd500" d="m20.6 13.5-3.8 1.9-3.4-3.4 3.4-3.4 3.8 2c1.2.7 1.2 2.3 0 2.9Z"/>
+      </svg>
+      <span><small>Get it on</small><b>Google Play</b></span>
     </a>
     <span class="cta-note">Free to download. Optional one-time Pro upgrade.</span>
+
+    <div class="stage">
+      <div class="fan">
+        <figure class="phone p1" style="margin-block:0"><img src="img/bz-wind.webp" alt="Bz magnetic field and solar wind speed charts" loading="eager"></figure>
+        <figure class="phone p2" style="margin-block:0"><img src="img/tonight-map.webp" alt="Tonight's aurora forecast map over Alaska"></figure>
+        <figure class="phone p3" style="margin-block:0"><img src="img/conditions-go.webp" alt="Storm conditions: Kp 7.0, Bz -9.9 nT, solar wind 776 km/s, Should I Go? says GO"></figure>
+        <figure class="phone p4" style="margin-block:0"><img src="img/sunspots.webp" alt="Active sunspot regions on the solar disc"></figure>
+        <figure class="phone p5" style="margin-block:0"><img src="img/hemi-power.webp" alt="Hemispheric power chart, 26 GW north and south"></figure>
+      </div>
+    </div>
   </div>
 </header>
 
 <main class="wrap">
-  <section aria-labelledby="features">
-    <h2 id="features">Everything you need on a storm night</h2>
-    <div class="grid">
-      <div class="card">
-        <h3><span class="dot" style="background: var(--green)"></span>Live conditions</h3>
-        <p>Solar wind, Bz, Kp and Hp30, hemispheric power and aurora probability for your location, updated through the night.</p>
-      </div>
-      <div class="card">
-        <h3><span class="dot" style="background: var(--blue)"></span>Storm alerts</h3>
-        <p>Notifications for geomagnetic storms, strong solar flares and incoming CMEs, at the thresholds you choose.</p>
-      </div>
-      <div class="card">
-        <h3><span class="dot" style="background: var(--amber)"></span>Solar activity</h3>
-        <p>Sunspot regions, X-ray flares, CME forecasts, SDO imagery and NOAA's three-day outlook in one place.</p>
-      </div>
-      <div class="card">
-        <h3><span class="dot" style="background: var(--violet)"></span>Learn as you go</h3>
-        <p>A built-in guide to what every number means and which ones actually decide whether tonight is worth it.</p>
-      </div>
-    </div>
-  </section>
+  <div class="section-head">
+    <h2>Everything you need on a storm night</h2>
+    <p>The numbers that decide whether tonight is worth it, pulled from NOAA and NASA and refreshed every few minutes.</p>
+  </div>
 
-  <section aria-labelledby="pro">
-    <div class="pro">
-      <h2 id="pro">Aurora Tracker Pro</h2>
+  <div class="rows">
+    <section class="row" style="--tint: var(--green)">
+      <div class="copy">
+        <p class="tag">Live conditions</p>
+        <h3>See the storm build in real time</h3>
+        <p>Solar wind, Bz, Kp and Hp30, hemispheric power and aurora probability for your location, updated through the night.</p>
+        <ul class="readings">
+          <li><b>Kp</b> 0–9</li>
+          <li><b>Bz</b> nT</li>
+          <li><b>Wind</b> km/s</li>
+          <li><b>Hemi power</b> GW</li>
+        </ul>
+      </div>
+      <div class="glow"><figure class="phone" style="margin:0"><img src="img/conditions.webp" alt="Aurora conditions screen" loading="lazy"></figure></div>
+    </section>
+
+    <section class="row" style="--tint: var(--violet)">
+      <div class="copy">
+        <p class="tag">Forecasts</p>
+        <h3>Plan the week, not just tonight</h3>
+        <p>The Kp 3-day forecast, the 27-day outlook, Hp30 nowcasts and NOAA's OVATION map of where the oval sits tonight.</p>
+        <ul class="readings">
+          <li><b>3-day</b> Kp</li>
+          <li><b>27-day</b> outlook</li>
+          <li><b>Hp30</b> nowcast</li>
+        </ul>
+      </div>
+      <div class="glow"><figure class="phone" style="margin:0"><img src="img/kp-forecast.webp" alt="Kp 3-day forecast chart" loading="lazy"></figure></div>
+    </section>
+
+    <section class="row" style="--tint: var(--magenta)">
+      <div class="copy">
+        <p class="tag">Storm alerts</p>
+        <h3>Get pinged at the level you care about</h3>
+        <p>Notifications for geomagnetic storms, strong solar flares and incoming CMEs. Pick a threshold from G1 minor to G5 extreme, depending on how far south you are.</p>
+        <ul class="readings">
+          <li><b>G1</b> minor</li>
+          <li><b>G3</b> strong</li>
+          <li><b>G5</b> extreme</li>
+          <li><b>X-class</b> flares</li>
+        </ul>
+      </div>
+      <div class="glow"><figure class="phone" style="margin:0"><img src="img/alerts.webp" alt="Alert threshold settings, G1 to G5" loading="lazy"></figure></div>
+    </section>
+
+    <section class="row" style="--tint: var(--amber)">
+      <div class="copy">
+        <p class="tag">Solar activity</p>
+        <h3>Watch the Sun that starts it all</h3>
+        <p>Sunspot regions, X-ray flares, CME forecasts, SDO imagery and NOAA's three-day outlook in one place, with a built-in guide to what every number means.</p>
+        <ul class="readings">
+          <li><b>Regions</b> &amp; spots</li>
+          <li><b>WSA-Enlil</b> CMEs</li>
+          <li><b>SDO</b> 131 · 193 · 304 Å</li>
+        </ul>
+      </div>
+      <div class="glow"><figure class="phone" style="margin:0"><img src="img/sunspots.webp" alt="Sunspot regions screen" loading="lazy"></figure></div>
+    </section>
+  </div>
+
+  <section class="pro" aria-labelledby="pro">
+    <div class="copy" style="max-width:none">
+      <p class="tag">Aurora Tracker Pro</p>
+      <h2 id="pro">Should I go out tonight?</h2>
       <p class="price">One-time purchase. No subscription.</p>
       <ul>
         <li>Should I Go? — tonight's go / no-go verdict</li>
@@ -220,7 +493,27 @@
         <li>Local time across every chart</li>
         <li>No ads</li>
       </ul>
+      <p class="pass">Not sure yet? Watch a short ad in the app to try Should I Go?, local weather and the hourly cloud forecast for a limited time.</p>
     </div>
+    <div class="pro-phones">
+      <figure class="phone" style="margin-block:0"><img src="img/cloud-forecast.webp" alt="Hourly cloud cover forecast" loading="lazy"></figure>
+      <figure class="phone" style="margin-block:0"><img src="img/hunt-log.webp" alt="Hunt Log with recorded sightings" loading="lazy"></figure>
+    </div>
+  </section>
+
+  <section class="closing">
+    <h2>The next storm is already on its way</h2>
+    <p>Install Aurora Tracker, set your alert level, and let the Sun tell you when to head out.</p>
+    <a class="play" href="https://play.google.com/store/apps/details?id=com.auroradev.tracker">
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path fill="#00d7fe" d="M3.6 1.8 13.4 12 3.6 22.2c-.4-.2-.6-.6-.6-1.1V2.9c0-.5.2-.9.6-1.1Z"/>
+        <path fill="#00f076" d="m16.8 8.6-3.4 3.4L3.6 1.8c.2-.1.5-.1.8 0l12.4 6.8Z"/>
+        <path fill="#ff3a44" d="M16.8 15.4 4.4 22.2c-.3.1-.6.1-.8 0L13.4 12l3.4 3.4Z"/>
+        <path fill="#ffd500" d="m20.6 13.5-3.8 1.9-3.4-3.4 3.4-3.4 3.8 2c1.2.7 1.2 2.3 0 2.9Z"/>
+      </svg>
+      <span><small>Get it on</small><b>Google Play</b></span>
+    </a>
+    <p class="langs">English · Deutsch · Norsk · Suomi · Svenska · Русский</p>
   </section>
 </main>
 
